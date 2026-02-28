@@ -3,11 +3,38 @@ Cave Leclerc Blagnac — Comparateur Vivino
 Streamlit app : scrape les vins Leclerc Blagnac + notes Vivino
 """
 
+import subprocess
+import sys
 import streamlit as st
 import requests
 import re
 import time
 import pandas as pd
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTO-INSTALL PLAYWRIGHT BROWSERS (nécessaire sur Streamlit Cloud)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_resource(show_spinner="⚙️ Installation de Chromium (première fois uniquement)…")
+def install_playwright_browsers():
+    """
+    Installe Chromium automatiquement au premier démarrage.
+    @cache_resource garantit que ça ne tourne qu'une seule fois par session.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        # Essayer aussi d'installer les dépendances système
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install-deps", "chromium"],
+            capture_output=True, text=True
+        )
+    return result.returncode == 0
+
+# Lancer l'installation dès le démarrage
+_playwright_ready = install_playwright_browsers()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
