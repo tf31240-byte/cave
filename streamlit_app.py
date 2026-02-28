@@ -1,7 +1,7 @@
 """
 Cave Leclerc Blagnac — Comparateur Vivino
-Scrape les vins via requests+BeautifulSoup (page SSR Angular),
-puis enrichit avec les notes Vivino.
+Le serveur Angular SSR de Leclerc lit le cookie "oaf-sign-code" pour filtrer
+les produits par magasin → simple requests + cookie, sans navigateur.
 """
 
 import streamlit as st
@@ -11,35 +11,35 @@ import re
 import time
 import pandas as pd
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIG PAGE
-# ─────────────────────────────────────────────────────────────────────────────
-
 st.set_page_config(
     page_title="Cave Leclerc Blagnac × Vivino",
     page_icon="🍷",
     layout="wide",
 )
 
-STORE_CODE  = "1431"   # Leclerc Blagnac
-LECLERC_URL = f"https://www.e.leclerc/cat/vins-rouges?oaf-sign-code={STORE_CODE}"
+# ─── Constantes ───────────────────────────────────────────────────────────────
+STORE_CODE   = "1431"          # Leclerc Blagnac
+LECLERC_BASE = "https://www.e.leclerc/cat/vins-rouges"
+MAX_PAGES    = 10              # sécurité anti-boucle infinie
 
-HEADERS_LECLERC = {
+HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "fr-FR,fr;q=0.9",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "fr-FR,fr;q=0.9",
     "Referer": "https://www.e.leclerc/",
 }
+
+# Le cookie "oaf-sign-code" dit au serveur Angular SSR quel magasin afficher.
+# Sans ce cookie, le serveur renvoie les produits nationaux sans filtre magasin.
+COOKIES = {"oaf-sign-code": STORE_CODE}
 
 HEADERS_VIVINO = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "application/json",
     "Accept-Language": "fr-FR,fr;q=0.9",
@@ -53,98 +53,73 @@ HEADERS_VIVINO = {
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Mono&family=DM+Sans:wght@300;400;500&display=swap');
-
 html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
-
-.main-title {
-    font-family: 'Playfair Display', serif;
-    font-size: 2.2rem; font-weight: 900; color: #1A0810;
-}
-.main-title span { color: #C9A84C; }
-.subtitle {
-    color: #8B6B72; font-size: 0.82rem;
-    letter-spacing: 0.08em; text-transform: uppercase;
-}
+.main-title { font-family:'Playfair Display',serif; font-size:2.2rem; font-weight:900; color:#1A0810; }
+.main-title span { color:#C9A84C; }
+.subtitle { color:#8B6B72; font-size:.82rem; letter-spacing:.08em; text-transform:uppercase; }
 .wine-card {
-    background: white; border-radius: 8px;
-    padding: 0.9rem 1.3rem; margin-bottom: 0.5rem;
-    border-left: 4px solid #6B1A2A;
-    box-shadow: 0 2px 8px rgba(26,8,16,.07);
-    display: flex; align-items: center;
-    justify-content: space-between; gap: 1rem;
+    background:white; border-radius:8px; padding:.9rem 1.3rem; margin-bottom:.5rem;
+    border-left:4px solid #6B1A2A; box-shadow:0 2px 8px rgba(26,8,16,.07);
+    display:flex; align-items:center; justify-content:space-between; gap:1rem;
 }
-.wine-card.top1 { border-left-color: #C9A84C; background: #fffdf4; }
-.wine-card.top2 { border-left-color: #9C9C9C; }
-.wine-card.top3 { border-left-color: #CD7F32; }
-.wine-rank {
-    font-family: 'DM Mono', monospace;
-    font-size: 1.3rem; min-width: 2.5rem; text-align: center;
-}
-.wine-info   { flex: 1; }
-.wine-name-text { font-weight: 600; font-size: 0.9rem; color: #1A0810; }
-.wine-vivino-name { font-size: 0.72rem; color: #8B6B72; font-style: italic; }
-.wine-price {
-    font-family: 'DM Mono', monospace;
-    font-size: 1.05rem; color: #1A0810;
-    min-width: 65px; text-align: right;
-}
-.wine-rating { min-width: 110px; text-align: center; }
-.stars { color: #C9A84C; font-size: 0.95rem; letter-spacing: 1px; }
-.rating-num { font-family: 'DM Mono'; font-size: 0.82rem; color: #1A0810; }
-.reviews { font-size: 0.62rem; color: #8B6B72; }
-.no-rating { font-size: 0.72rem; color: #ccc; font-style: italic; }
-.ratio-wrap { min-width: 130px; }
-.ratio-bar-bg {
-    background: rgba(107,26,42,.1); border-radius: 3px;
-    height: 6px; overflow: hidden; margin-top: 4px;
-}
-.ratio-bar-fill {
-    height: 100%;
-    background: linear-gradient(90deg, #6B1A2A, #C9A84C);
-    border-radius: 3px;
-}
-.ratio-num-text { font-family: 'DM Mono'; font-size: 0.78rem; color: #6B1A2A; }
-.badge {
-    display: inline-block; padding: 0.15rem 0.5rem;
-    border-radius: 3px; font-size: 0.62rem; font-family: 'DM Mono';
-}
-.badge-deal { background: rgba(201,168,76,.15); color: #8B6030; border: 1px solid rgba(201,168,76,.4); }
-.badge-top  { background: rgba(107,26,42,.08);  color: #6B1A2A; border: 1px solid rgba(107,26,42,.2); }
+.wine-card.top1 { border-left-color:#C9A84C; background:#fffdf4; }
+.wine-card.top2 { border-left-color:#9C9C9C; }
+.wine-card.top3 { border-left-color:#CD7F32; }
+.wine-rank { font-family:'DM Mono',monospace; font-size:1.3rem; min-width:2.5rem; text-align:center; }
+.wine-info { flex:1; }
+.wine-name-text { font-weight:600; font-size:.9rem; color:#1A0810; }
+.wine-vivino-name { font-size:.72rem; color:#8B6B72; font-style:italic; }
+.wine-price { font-family:'DM Mono',monospace; font-size:1.05rem; color:#1A0810; min-width:68px; text-align:right; }
+.wine-rating { min-width:110px; text-align:center; }
+.stars { color:#C9A84C; font-size:.95rem; letter-spacing:1px; }
+.rating-num { font-family:'DM Mono'; font-size:.82rem; color:#1A0810; }
+.reviews { font-size:.62rem; color:#8B6B72; }
+.no-rating { font-size:.72rem; color:#ccc; font-style:italic; }
+.ratio-wrap { min-width:130px; }
+.ratio-bar-bg { background:rgba(107,26,42,.1); border-radius:3px; height:6px; overflow:hidden; margin-top:4px; }
+.ratio-bar-fill { height:100%; background:linear-gradient(90deg,#6B1A2A,#C9A84C); border-radius:3px; }
+.ratio-num-text { font-family:'DM Mono'; font-size:.78rem; color:#6B1A2A; }
+.badge { display:inline-block; padding:.15rem .5rem; border-radius:3px; font-size:.62rem; font-family:'DM Mono'; }
+.badge-deal { background:rgba(201,168,76,.15); color:#8B6030; border:1px solid rgba(201,168,76,.4); }
+.badge-top  { background:rgba(107,26,42,.08);  color:#6B1A2A; border:1px solid rgba(107,26,42,.2); }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SCRAPER LECLERC — requests + BeautifulSoup
-# La page e.leclerc est rendue côté serveur (Angular Universal/SSR) :
-# tous les produits sont dans le HTML initial, sans JS nécessaire.
+# SCRAPER LECLERC
 # ─────────────────────────────────────────────────────────────────────────────
 
-def scrape_leclerc(url: str = LECLERC_URL) -> list[dict]:
+def fetch_page(page_num: int) -> BeautifulSoup | None:
+    """Télécharge une page de résultats Leclerc avec le cookie magasin."""
+    params = {} if page_num == 1 else {"page": page_num}
     try:
-        resp = requests.get(url, headers=HEADERS_LECLERC, timeout=20)
-        resp.raise_for_status()
-    except Exception as e:
-        raise RuntimeError(f"Impossible de charger la page Leclerc : {e}")
-
-    soup  = BeautifulSoup(resp.text, "html.parser")
-    cards = soup.find_all("app-product-card")
-
-    if not cards:
-        raise RuntimeError(
-            "Aucun produit trouvé dans la page. "
-            "Leclerc a peut-être modifié sa structure HTML."
+        resp = requests.get(
+            LECLERC_BASE,
+            params=params,
+            headers=HEADERS,
+            cookies=COOKIES,
+            timeout=20,
         )
+        resp.raise_for_status()
+        return BeautifulSoup(resp.text, "html.parser")
+    except Exception as e:
+        raise RuntimeError(f"Erreur page {page_num} : {e}")
 
+
+def parse_cards(soup: BeautifulSoup) -> list[dict]:
+    """Extrait les vins d'une page BeautifulSoup."""
+    cards = soup.find_all("app-product-card")
     wines = []
+
     for card in cards:
-        # Nom
+        # ── Nom ──
         label = card.find(class_="product-label")
         name  = label.get_text(strip=True) if label else ""
         if not name:
             continue
 
-        # Prix : price-unit = entier, price-cents = centimes
+        # ── Prix ──
         price = 0.0
         unit_els  = card.find_all(class_=lambda c: c and "price-unit"  in c.split())
         cents_els = card.find_all(class_=lambda c: c and "price-cents" in c.split())
@@ -156,28 +131,79 @@ def scrape_leclerc(url: str = LECLERC_URL) -> list[dict]:
             except ValueError:
                 price = 0.0
 
-        # URL
+        # ── URL ──
         link = card.find("a", href=True)
-        if link:
-            href = link["href"]
-            url_wine = href if href.startswith("http") else f"https://www.e.leclerc{href}"
-        else:
-            url_wine = ""
+        href = link["href"] if link else ""
+        url  = href if href.startswith("http") else f"https://www.e.leclerc{href}"
 
-        # Image
+        # ── EAN ──
+        ean_m = re.search(r"offer_m-(\d{13})-\d+", str(card))
+        ean   = ean_m.group(1) if ean_m else re.search(r"-(\d{13})$", url)
+        if hasattr(ean, "group"):
+            ean = ean.group(1)
+
+        # ── Image ──
         img   = card.find("img")
         image = ""
         if img:
             image = (
                 img.get("src")
                 or img.get("data-src")
-                or (img.get("data-srcset", "").split()[0])
+                or (img.get("data-srcset", "").split()[0] if img.get("data-srcset") else "")
                 or ""
             )
 
-        wines.append({"name": name, "price": price, "url": url_wine, "image": image})
-
+        wines.append({"name": name, "price": price, "url": url,
+                      "ean": ean or "", "image": image})
     return wines
+
+
+def get_total_pages(soup: BeautifulSoup) -> int:
+    """Détecte le nombre total de pages depuis la pagination."""
+    # Cherche tous les numéros de page dans les liens de pagination
+    page_nums = []
+    for a in soup.find_all("a", href=True):
+        m = re.search(r"[?&]page=(\d+)", a["href"])
+        if m:
+            page_nums.append(int(m.group(1)))
+    return max(page_nums) if page_nums else 1
+
+
+def scrape_leclerc(status_fn=None) -> list[dict]:
+    """
+    Scrape toutes les pages de vins rouges Leclerc Blagnac.
+    status_fn : callback optionnel pour mettre à jour la progression.
+    """
+    # Page 1
+    if status_fn:
+        status_fn("📡 Chargement page 1…")
+    soup1     = fetch_page(1)
+    cards1    = parse_cards(soup1)
+    nb_pages  = min(get_total_pages(soup1), MAX_PAGES)
+
+    if status_fn:
+        status_fn(f"✅ Page 1 — {len(cards1)} vins. {nb_pages} page(s) détectée(s).")
+
+    all_wines = cards1
+
+    # Pages suivantes
+    for p in range(2, nb_pages + 1):
+        if status_fn:
+            status_fn(f"📡 Chargement page {p}/{nb_pages}…")
+        try:
+            soup = fetch_page(p)
+            new  = parse_cards(soup)
+            if not new:
+                break
+            # Dédoublonnage par EAN
+            existing_eans = {w["ean"] for w in all_wines if w["ean"]}
+            all_wines += [w for w in new if w["ean"] not in existing_eans]
+        except Exception as e:
+            if status_fn:
+                status_fn(f"⚠️ Page {p} ignorée : {e}")
+        time.sleep(0.5)   # être respectueux avec le serveur
+
+    return all_wines
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,47 +211,37 @@ def scrape_leclerc(url: str = LECLERC_URL) -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def search_vivino(wine_name: str) -> dict | None:
-    # Nettoyer : retirer "75 cl", AOP, millésime final…
     clean = re.sub(r"\s*-\s*(Rouge|Blanc|Rosé|Moelleux)\s*-\s*\d+\s*cl.*", "", wine_name, flags=re.I)
-    clean = re.sub(r"\s*-\s*(AOP|IGP|AOC|Vin de France).*",               "", clean,      flags=re.I)
-    clean = re.sub(r"\s+\d{4}\s*$",                                         "", clean).strip()
+    clean = re.sub(r"\s*-\s*(AOP|IGP|AOC|Vin de France).*", "", clean, flags=re.I)
+    clean = re.sub(r"\s+\d{4}\s*$", "", clean).strip()
     query = " ".join(clean.split()[:6])
 
     try:
         resp = requests.get(
             "https://www.vivino.com/api/explore/explore",
-            params={
-                "language": "fr",
-                "wine_type_ids[]": 1,
-                "q": query,
-                "order_by": "match",
-                "per_page": 3,
-            },
+            params={"language": "fr", "wine_type_ids[]": 1,
+                    "q": query, "order_by": "match", "per_page": 3},
             headers=HEADERS_VIVINO,
             timeout=8,
         )
         if resp.status_code != 200:
             return None
-
         records = resp.json().get("explore_vintage", {}).get("records", [])
         if not records:
             return None
-
         best    = records[0]
         vintage = best.get("vintage", {})
         wine    = vintage.get("wine", {})
         stats   = vintage.get("statistics", wine.get("statistics", {}))
-        rating  = stats.get("ratings_average", 0) or 0
-        count   = stats.get("ratings_count",   0) or 0
-
+        rating  = float(stats.get("ratings_average", 0) or 0)
+        count   = int(stats.get("ratings_count", 0) or 0)
         if not rating:
             return None
-
         return {
             "vivino_name":   wine.get("name", ""),
             "vivino_year":   vintage.get("year", ""),
-            "rating":        round(float(rating), 2),
-            "ratings_count": int(count),
+            "rating":        round(rating, 2),
+            "ratings_count": count,
             "vivino_url":    f"https://www.vivino.com{wine.get('seo_name', '')}",
         }
     except Exception:
@@ -237,41 +253,28 @@ def search_vivino(wine_name: str) -> dict | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_stars(r: float) -> str:
-    s = ""
-    for i in range(1, 6):
-        if r >= i:         s += "★"
-        elif r >= i - .5: s += "½"
-        else:              s += "☆"
-    return s
+    return "".join("★" if r >= i else ("½" if r >= i - .5 else "☆") for i in range(1, 6))
 
 
 def wine_card_html(wine: dict, rank: int, max_ratio: float) -> str:
     card_cls  = {1: "top1", 2: "top2", 3: "top3"}.get(rank, "")
-    rank_icon = {1: "🥇",   2: "🥈",   3: "🥉"  }.get(rank, f"#{rank}")
-
+    rank_icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"#{rank}")
     name_html = (
         f'<a href="{wine["url"]}" target="_blank" style="color:#1A0810;text-decoration:none">'
-        f'{wine["name"]}</a>'
-        if wine.get("url") else wine["name"]
+        f'{wine["name"]}</a>' if wine.get("url") else wine["name"]
     )
     vivino_sub = ""
     if wine.get("vivino_name") and wine["vivino_name"] != wine["name"]:
-        vivino_sub = (
-            f'<div class="wine-vivino-name">'
-            f'Vivino : {wine["vivino_name"]} {wine.get("vivino_year","")}'
-            f'</div>'
-        )
+        vivino_sub = (f'<div class="wine-vivino-name">'
+                      f'Vivino : {wine["vivino_name"]} {wine.get("vivino_year","")}</div>')
 
     rating = wine.get("rating")
     if rating:
         cnt = f"{wine.get('ratings_count', 0):,}".replace(",", "\u202f")
-        rating_html = (
-            f'<div class="wine-rating">'
-            f'<div class="stars">{build_stars(rating)}</div>'
-            f'<div class="rating-num">{rating:.2f} / 5</div>'
-            f'<div class="reviews">{cnt} avis</div>'
-            f'</div>'
-        )
+        rating_html = (f'<div class="wine-rating">'
+                       f'<div class="stars">{build_stars(rating)}</div>'
+                       f'<div class="rating-num">{rating:.2f} / 5</div>'
+                       f'<div class="reviews">{cnt} avis</div></div>')
     else:
         rating_html = '<div class="wine-rating no-rating">non trouvé sur Vivino</div>'
 
@@ -281,21 +284,17 @@ def wine_card_html(wine: dict, rank: int, max_ratio: float) -> str:
         f'<div class="ratio-wrap">'
         f'<div class="ratio-num-text">{ratio:.3f}</div>'
         f'<div class="ratio-bar-bg"><div class="ratio-bar-fill" style="width:{pct:.1f}%"></div></div>'
-        f'</div>'
-        if ratio else '<div class="no-rating">—</div>'
+        f'</div>' if ratio else '<div class="no-rating">—</div>'
     )
 
     badges = ""
-    if ratio > 0 and rank <= 5:   badges += '<span class="badge badge-deal">🔥 Top ratio</span> '
-    if rating and rating >= 4.2:  badges += '<span class="badge badge-top">★ Top noté</span> '
+    if ratio > 0 and rank <= 5:  badges += '<span class="badge badge-deal">🔥 Top ratio</span> '
+    if rating and rating >= 4.2: badges += '<span class="badge badge-top">★ Top noté</span> '
     if wine.get("vivino_url"):
-        badges += (
-            f'<a href="{wine["vivino_url"]}" target="_blank" '
-            f'style="font-size:.68rem;color:#8B6B72;text-decoration:none">→ Vivino</a>'
-        )
+        badges += (f'<a href="{wine["vivino_url"]}" target="_blank" '
+                   f'style="font-size:.68rem;color:#8B6B72;text-decoration:none">→ Vivino</a>')
 
     price_fmt = f'{wine["price"]:.2f}'.replace(".", ",") + " €"
-
     return (
         f'<div class="wine-card {card_cls}">'
         f'<div class="wine-rank">{rank_icon}</div>'
@@ -315,8 +314,10 @@ def wine_card_html(wine: dict, rank: int, max_ratio: float) -> str:
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.markdown('<div class="main-title">Cave <span>Leclerc Blagnac</span> × Vivino</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Comparateur qualité / prix — Vins rouges disponibles en magasin</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">Cave <span>Leclerc Blagnac</span> × Vivino</div>',
+            unsafe_allow_html=True)
+st.markdown('<div class="subtitle">Comparateur qualité / prix — Vins rouges disponibles en magasin</div>',
+            unsafe_allow_html=True)
 st.markdown("<br>", unsafe_allow_html=True)
 
 # Sidebar
@@ -336,7 +337,7 @@ with st.sidebar:
     )
     st.divider()
     scrape_btn = st.button("🔄 Lancer / Rafraîchir", use_container_width=True, type="primary")
-    st.caption(f"Source : Leclerc Blagnac (magasin {STORE_CODE})")
+    st.caption(f"📍 Leclerc Blagnac (magasin {STORE_CODE})")
 
 # Session
 if "wines" not in st.session_state:
@@ -345,21 +346,30 @@ if "wines" not in st.session_state:
 if scrape_btn or not st.session_state.wines:
     st.session_state.wines = []
 
-    with st.status("🔍 Chargement des vins…", expanded=True) as status:
-        # 1. Scraping Leclerc
+    with st.status("🔍 Chargement en cours…", expanded=True) as status:
+        # 1. Scraping
+        log_placeholder = st.empty()
+        def update_log(msg):
+            log_placeholder.write(msg)
+
         try:
-            st.write("📡 Téléchargement de la page Leclerc Blagnac…")
-            raw_wines = scrape_leclerc()
+            raw_wines = scrape_leclerc(status_fn=update_log)
             st.write(f"✅ {len(raw_wines)} vins trouvés en stock à Blagnac")
         except RuntimeError as e:
             st.error(str(e))
+            st.stop()
+
+        if not raw_wines:
+            st.error(
+                "Aucun produit récupéré. Leclerc a peut-être modifié son site. "
+                "Essayez dans quelques minutes."
+            )
             st.stop()
 
         # 2. Vivino
         st.write("🍷 Recherche des notes Vivino…")
         enriched = []
         prog = st.progress(0)
-
         for i, wine in enumerate(raw_wines):
             vd = search_vivino(wine["name"])
             if vd:
@@ -378,7 +388,7 @@ if scrape_btn or not st.session_state.wines:
             time.sleep(0.25)
 
         st.session_state.wines = enriched
-        status.update(label=f"✅ {len(enriched)} vins analysés", state="complete")
+        status.update(label=f"✅ {len(enriched)} vins analysés !", state="complete")
 
 # Affichage
 wines = st.session_state.wines
@@ -410,7 +420,7 @@ if wines:
         st.metric("💶 Prix moyen", f"{avg_p:.2f} €".replace(".", ","))
     with c3:
         rated = [w for w in filtered if w.get("rating")]
-        avg_r = sum(w["rating"] for w in rated) / max(len(rated), 1)
+        avg_r = sum(w["rating"] for w in rated) / max(len(rated), 1) if rated else 0
         st.metric("⭐ Note moy. Vivino", f"★ {avg_r:.2f}" if rated else "—")
     with c4:
         best = max(filtered, key=lambda x: x.get("ratio") or 0, default=None)
@@ -421,6 +431,7 @@ if wines:
         df = pd.DataFrame([{
             "Nom":         w["name"],
             "Prix (€)":    w["price"],
+            "EAN":         w.get("ean", ""),
             "Note Vivino": w.get("rating", ""),
             "Nb avis":     w.get("ratings_count", ""),
             "Ratio ★/€":  w.get("ratio", ""),
@@ -435,7 +446,6 @@ if wines:
 
     st.divider()
     st.markdown("### 🏅 Classement qualité / prix")
-
     max_ratio = max((w.get("ratio") or 0 for w in filtered), default=1)
     for i, wine in enumerate(filtered):
         st.markdown(wine_card_html(wine, i + 1, max_ratio), unsafe_allow_html=True)
