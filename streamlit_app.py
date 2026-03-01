@@ -22,11 +22,29 @@ LECLERC_BASE = "https://www.e.leclerc/cat/vins-rouges"
 MAX_PAGES    = 10
 
 HEADERS_VIVINO = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json",
-    "Accept-Language": "fr-FR,fr;q=0.9",
-    "Referer": "https://www.vivino.com/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "X-Requested-With": "XMLHttpRequest",
+    "Referer": "https://www.vivino.com/explore",
+    "Origin": "https://www.vivino.com",
+    "Connection": "keep-alive",
 }
+
+# Session persistante — Vivino exige des cookies de session valides
+# On l'initialise une fois au démarrage
+@st.cache_resource(show_spinner=False)
+def get_vivino_session() -> requests.Session:
+    """Crée une session Vivino avec cookies valides."""
+    session = requests.Session()
+    session.headers.update(HEADERS_VIVINO)
+    try:
+        # Premier appel pour récupérer les cookies de session
+        session.get("https://www.vivino.com/explore", timeout=10)
+    except Exception:
+        pass
+    return session
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CSS
@@ -82,8 +100,9 @@ def parse_cards_from_html(html: str) -> list[dict]:
         name  = label.get_text(strip=True) if label else ""
         if not name:
             continue
-        # Prix : price-unit = entier, price-cents = centimes
+        # Prix — 3 méthodes de fallback pour couvrir toutes les structures Leclerc
         price = 0.0
+        # Méthode 1 : price-unit + price-cents séparés (cas courant)
         unit_els  = card.find_all(class_=lambda c: c and "price-unit"  in c.split())
         cents_els = card.find_all(class_=lambda c: c and "price-cents" in c.split())
         if unit_els and cents_els:
@@ -92,7 +111,25 @@ def parse_cards_from_html(html: str) -> list[dict]:
             try:
                 price = float(f"{u}.{c}")
             except ValueError:
-                price = 0.0
+                pass
+        # Méthode 2 : classe .price directement (ex: "3€,50" en un seul élément)
+        if price == 0:
+            price_el = card.find(class_=lambda c: c and c.split() == ["price"])
+            if price_el:
+                txt = price_el.get_text(strip=True).replace("€","").replace("\xa0","")
+                txt = re.sub(r",(\d{2})$", r".\1", txt.strip()).replace(",","")
+                m2  = re.search(r"(\d+\.?\d*)", txt)
+                if m2:
+                    try: price = float(m2.group(1))
+                    except ValueError: pass
+        # Méthode 3 : regex sur le bloc prix complet (dernier recours)
+        if price == 0:
+            blk = card.find(class_="block-price-and-availability")
+            if blk:
+                m3 = re.search(r"(\d+)[€,\s](\d{2})", blk.get_text(strip=True))
+                if m3:
+                    try: price = float(f"{m3.group(1)}.{m3.group(2)}")
+                    except ValueError: pass
         # URL
         link = card.find("a", href=True)
         href = link["href"] if link else ""
@@ -269,38 +306,84 @@ def clean_name_for_vivino(wine_name: str) -> str:
 
 
 def search_vivino(wine_name: str) -> dict | None:
+    """
+    Cherche un vin sur Vivino via la session persistante (cookies requis).
+    Essaie /api/explore/explore puis /api/wines/search en fallback.
+    """
     query = clean_name_for_vivino(wine_name)
     if not query:
         return None
-    try:
-        resp = requests.get(
-            "https://www.vivino.com/api/explore/explore",
-            params={"language":"fr","wine_type_ids[]":1,
-                    "q":query,"order_by":"match","per_page":3},
-            headers=HEADERS_VIVINO, timeout=8,
-        )
-        if resp.status_code != 200:
-            return None
-        records = resp.json().get("explore_vintage",{}).get("records",[])
+
+    session = get_vivino_session()
+
+    def parse_record(records):
         if not records:
             return None
         best    = records[0]
         vintage = best.get("vintage", {})
         wine    = vintage.get("wine", {})
-        stats   = vintage.get("statistics", wine.get("statistics", {}))
-        rating  = float(stats.get("ratings_average", 0) or 0)
-        count   = int(stats.get("ratings_count", 0) or 0)
+        # Stats : chercher dans vintage d'abord, puis wine, puis wine.statistics
+        stats = (vintage.get("statistics")
+                 or wine.get("statistics")
+                 or {})
+        rating = float(stats.get("ratings_average") or 0)
+        count  = int(stats.get("ratings_count") or 0)
         if not rating:
             return None
+        seo = wine.get("seo_name","")
         return {
             "vivino_name":   wine.get("name",""),
             "vivino_year":   vintage.get("year",""),
             "rating":        round(rating, 2),
             "ratings_count": count,
-            "vivino_url":    f"https://www.vivino.com{wine.get('seo_name','')}",
+            "vivino_url":    f"https://www.vivino.com{seo}" if seo else "",
         }
+
+    # Tentative 1 : /api/explore/explore
+    try:
+        resp = session.get(
+            "https://www.vivino.com/api/explore/explore",
+            params={"language":"fr","wine_type_ids[]":1,
+                    "q":query,"order_by":"match","per_page":3},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            result = parse_record(
+                resp.json().get("explore_vintage",{}).get("records",[])
+            )
+            if result:
+                return result
     except Exception:
-        return None
+        pass
+
+    # Tentative 2 : /api/wines/search (endpoint alternatif)
+    try:
+        resp2 = session.get(
+            "https://www.vivino.com/api/wines/search",
+            params={"q": query, "language": "fr", "per_page": 3},
+            timeout=10,
+        )
+        if resp2.status_code == 200:
+            wines_list = resp2.json().get("wines", [])
+            # Cet endpoint retourne wine directement avec statistics
+            if wines_list:
+                w = wines_list[0]
+                stats  = w.get("statistics", {})
+                rating = float(stats.get("ratings_average") or 0)
+                count  = int(stats.get("ratings_count") or 0)
+                if rating:
+                    seo = w.get("seo_name","")
+                    return {
+                        "vivino_name":   w.get("name",""),
+                        "vivino_year":   "",
+                        "rating":        round(rating, 2),
+                        "ratings_count": count,
+                        "vivino_url":    f"https://www.vivino.com{seo}" if seo else "",
+                    }
+    except Exception:
+        pass
+
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
