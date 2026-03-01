@@ -176,18 +176,44 @@ def get_nb_pages(html: str) -> int:
 
 def build_vivino_query(wine_name: str) -> str:
     """
-    Query pour l'API Vivino : "{nom} {appellation}" — sans "vivino rating".
-    Ex: "Mouton Cadet Bordeaux", "E.Guigal Côtes du Rhône"
+    Nettoyage du nom Leclerc pour l'API Vivino.
+    - Supprime BIO, Magnum, année, AOP/IGP
+    - Normalise les MAJUSCULES
+    - Tronque sur Cuvée/Vieilles Vignes/Grande à partir du 3e mot
     """
+    # 1. Nom propre (avant virgule ou " - ")
     nom = re.split(r",\s*|\s+-\s+", wine_name)[0].strip()
+
+    # 2. Supprimer "Magnum" (format de bouteille)
+    nom = re.sub(r"^Magnum\s+", "", nom, flags=re.I).strip()
+
+    # 3. Supprimer l'année
     nom = re.sub(r"\b(19|20)\d{2}\b", "", nom).strip().strip("-").strip()
 
+    # 4. Supprimer BIO
+    nom = re.sub(r"\s+BIO\b", "", nom, flags=re.I).strip()
+
+    # 5. Normaliser si tout en majuscules (CHATEAU DE RUTH → Chateau De Ruth)
+    if re.match(r"^[A-Z][A-Z\s\'\-]+$", nom):
+        nom = nom.title()
+
+    # 6. Tronquer sur les mots de cuvée à partir du 3e mot
+    cut_at = {"Cuvée", "Cuvee", "Vieilles", "Vieille", "Grande"}
+    words = nom.split()
+    if len(words) > 2:
+        for i, w in enumerate(words[2:], start=2):
+            if w in cut_at:
+                nom = " ".join(words[:i]).strip()
+                break
+
+    # 7. Appellation
     app_m = re.search(r"-\s*([\w\s\-]+?)\s*(?:AOP|IGP|AOC|Vin de France)", wine_name, re.I)
     appellation = app_m.group(1).strip() if app_m else ""
 
     parts = [nom]
     if appellation and appellation.lower() not in nom.lower():
         parts.append(appellation)
+
     return " ".join(parts)
 
 
