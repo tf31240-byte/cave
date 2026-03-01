@@ -302,6 +302,40 @@ def parse_vivino_search_html(html: str, wine_vintage: int | None) -> dict | None
     }
 
 
+def get_selenium_driver():
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    import os
+
+    opts = Options()
+    opts.add_argument("--headless")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1280,800")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+
+    for binary in ["/usr/bin/chromium", "/usr/bin/chromium-browser",
+                   "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"]:
+        if os.path.exists(binary):
+            opts.binary_location = binary
+            break
+
+    for drv in ["/usr/bin/chromedriver", "/usr/lib/chromium/chromedriver",
+                "/usr/lib/chromium-browser/chromedriver"]:
+        if os.path.exists(drv):
+            return webdriver.Chrome(service=Service(drv), options=opts)
+
+    return webdriver.Chrome(options=opts)
+
+
 def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
     """
     1. Scrape Leclerc (Selenium)
