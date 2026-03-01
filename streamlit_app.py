@@ -1,7 +1,8 @@
 """
 Cave Leclerc Blagnac — Comparateur Vivino
-Testé et validé : parser HTML, nettoyage noms, ratio, pagination.
-Utilise Selenium + Chromium système (packages.txt sur Streamlit Cloud).
+- Filtre par type de vin (Rouge / Blanc / Rosé / Mousseux)
+- Notes Vivino via recherche DuckDuckGo (pas d'API, pas de blocage IP)
+- Vérification du millésime
 """
 
 import streamlit as st
@@ -10,6 +11,7 @@ from bs4 import BeautifulSoup
 import re
 import time
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(
     page_title="Cave Leclerc Blagnac × Vivino",
@@ -17,11 +19,27 @@ st.set_page_config(
     layout="wide",
 )
 
-STORE_CODE  = "1431"
-LECLERC_BASE = "https://www.e.leclerc/cat/vins-rouges"
-MAX_PAGES    = 10
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSTANTES
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Vivino est interrogé via Selenium (même navigateur) pour éviter le blocage IP
+STORE_CODE = "1431"
+MAX_PAGES  = 10
+
+# Types de vins disponibles sur Leclerc
+WINE_TYPES = {
+    "🔴 Rouge":     "vins-rouges",
+    "⚪ Blanc":     "vins-blancs",
+    "🌸 Rosé":      "vins-roses",
+    "🍾 Mousseux":  "vins-mousseux-et-petillants",
+}
+
+def leclerc_url(wine_type_slug: str, page: int = 1) -> str:
+    base = f"https://www.e.leclerc/cat/{wine_type_slug}"
+    if page > 1:
+        return f"{base}?page={page}#oaf-sign-code={STORE_CODE}"
+    return f"{base}#oaf-sign-code={STORE_CODE}"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CSS
@@ -42,12 +60,13 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .wine-card.top1 { border-left-color:#C9A84C; background:#fffdf4; }
 .wine-card.top2 { border-left-color:#9C9C9C; }
 .wine-card.top3 { border-left-color:#CD7F32; }
+.wine-card.vintage-warn { border-right: 3px solid #f59e0b; }
 .wine-rank { font-family:'DM Mono',monospace; font-size:1.3rem; min-width:2.5rem; text-align:center; }
 .wine-info { flex:1; }
 .wine-name-text { font-weight:600; font-size:.9rem; color:#1A0810; }
-.wine-vivino-name { font-size:.72rem; color:#8B6B72; font-style:italic; }
+.wine-sub { font-size:.72rem; color:#8B6B72; font-style:italic; }
 .wine-price { font-family:'DM Mono',monospace; font-size:1.05rem; color:#1A0810; min-width:68px; text-align:right; }
-.wine-rating { min-width:110px; text-align:center; }
+.wine-rating { min-width:120px; text-align:center; }
 .stars { color:#C9A84C; font-size:.95rem; letter-spacing:1px; }
 .rating-num { font-family:'DM Mono'; font-size:.82rem; color:#1A0810; }
 .reviews { font-size:.62rem; color:#8B6B72; }
@@ -56,91 +75,211 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .ratio-bar-bg { background:rgba(107,26,42,.1); border-radius:3px; height:6px; overflow:hidden; margin-top:4px; }
 .ratio-bar-fill { height:100%; background:linear-gradient(90deg,#6B1A2A,#C9A84C); border-radius:3px; }
 .ratio-num-text { font-family:'DM Mono'; font-size:.78rem; color:#6B1A2A; }
-.badge { display:inline-block; padding:.15rem .5rem; border-radius:3px; font-size:.62rem; font-family:'DM Mono'; }
+.badge { display:inline-block; padding:.15rem .5rem; border-radius:3px; font-size:.62rem; font-family:'DM Mono'; margin-right:.2rem; }
 .badge-deal { background:rgba(201,168,76,.15); color:#8B6030; border:1px solid rgba(201,168,76,.4); }
 .badge-top  { background:rgba(107,26,42,.08);  color:#6B1A2A; border:1px solid rgba(107,26,42,.2); }
+.badge-year { background:rgba(245,158,11,.1);  color:#92400e; border:1px solid rgba(245,158,11,.4); }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PARSEUR HTML  (testé sur 96 produits réels Blagnac)
+# PARSEUR HTML LECLERC
 # ─────────────────────────────────────────────────────────────────────────────
+
+def extract_year_from_name(name: str) -> int | None:
+    """Extrait le millésime (année) depuis le nom Leclerc. Ex: '...2022...' → 2022"""
+    m = re.search(r"\b(19[5-9]\d|20[0-3]\d)\b", name)
+    return int(m.group(1)) if m else None
+
 
 def parse_cards_from_html(html: str) -> list[dict]:
     soup  = BeautifulSoup(html, "html.parser")
     cards = soup.find_all("app-product-card")
     wines = []
+
     for card in cards:
         # Nom
         label = card.find(class_="product-label")
         name  = label.get_text(strip=True) if label else ""
         if not name:
             continue
-        # Prix — block-price-and-availability contient toujours "12€,00" ou "3€,50"
-        # C'est le plus robuste : fonctionne en SSR et CSR (Selenium)
+
+        # Prix — via block-price-and-availability (robuste SSR + CSR)
         price = 0.0
-        blk = card.find(class_=lambda c: c and "block-price-and-availability" in c.split())
+        blk   = card.find(class_=lambda c: c and "block-price-and-availability" in c.split())
         if blk:
-            m_price = re.search(r"(\d+)€,(\d{2})", blk.get_text(strip=True))
-            if m_price:
+            m = re.search(r"(\d+)€,(\d{2})", blk.get_text(strip=True))
+            if m:
                 try:
-                    price = float(f"{m_price.group(1)}.{m_price.group(2)}")
+                    price = float(f"{m.group(1)}.{m.group(2)}")
                 except ValueError:
                     pass
-        # Fallback : price-unit + price-cents séparés
+        # Fallback price-unit / price-cents
         if price == 0:
-            unit_els  = card.find_all(class_=lambda c: c and "price-unit"  in c.split())
-            cents_els = card.find_all(class_=lambda c: c and "price-cents" in c.split())
-            if unit_els and cents_els:
-                u = unit_els[0].get_text(strip=True)
-                c = cents_els[0].get_text(strip=True).lstrip(",").strip()
+            ue = card.find_all(class_=lambda c: c and "price-unit"  in c.split())
+            ce = card.find_all(class_=lambda c: c and "price-cents" in c.split())
+            if ue and ce:
                 try:
-                    price = float(f"{u}.{c}")
+                    price = float(f"{ue[0].get_text(strip=True)}.{ce[0].get_text(strip=True).lstrip(',').strip()}")
                 except ValueError:
                     pass
+
         # URL
         link = card.find("a", href=True)
         href = link["href"] if link else ""
         url  = href if href.startswith("http") else f"https://www.e.leclerc{href}"
+
         # EAN
         ean_m = re.search(r"offer_m-(\d{13})-\d+", str(card))
         ean   = ean_m.group(1) if ean_m else ""
         if not ean:
             m2 = re.search(r"-(\d{13})$", url)
             ean = m2.group(1) if m2 else ""
+
         # Image
-        img = card.find("img")
+        img   = card.find("img")
         image = ""
         if img:
             image = (img.get("src") or img.get("data-src") or
                      (img.get("data-srcset","").split()[0] if img.get("data-srcset") else "") or "")
-        wines.append({"name": name, "price": price, "url": url, "ean": ean, "image": image})
+
+        wines.append({
+            "name":    name,
+            "price":   price,
+            "url":     url,
+            "ean":     ean,
+            "image":   image,
+            "vintage": extract_year_from_name(name),
+        })
+
     return wines
 
 
 def get_nb_pages(html: str) -> int:
-    """Détecte le nb de pages depuis les liens de pagination dans le HTML rendu."""
     soup = BeautifulSoup(html, "html.parser")
-    page_nums = []
+    nums = []
     for a in soup.find_all("a", href=True):
         m = re.search(r"[?&]page=(\d+)", a["href"])
         if m:
-            page_nums.append(int(m.group(1)))
-    # max page lié = dernière page (ex: lien "page=2" → 2 pages)
-    return max(page_nums) if page_nums else 1
+            nums.append(int(m.group(1)))
+    return max(nums) if nums else 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SELENIUM SCRAPER
-# Pagination : navigation directe par URL (?page=N#oaf-sign-code=1431)
-# car le bouton "next" Angular n'a pas de href cliquable
+# VIVINO — RECHERCHE WEB (DuckDuckGo)
+# Même approche que votre ancien code JS :
+#   query = "{nom} {appellation} vivino rating"
+#   → on cherche sur le web, on filtre les URLs vivino.com
+#   → on extrait note + avis depuis le snippet
+#   → on vérifie le millésime
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_vivino_query(wine_name: str) -> str:
+    """
+    Construit la query web : "{nom propre} {appellation} vivino rating"
+    Ex: "E.Guigal Côtes du Rhône vivino rating"
+    Coupe sur la première virgule OU le premier " - " pour isoler le nom.
+    """
+    # Nom propre : avant la 1ère virgule OU avant le 1er " - "
+    nom = re.split(r",\s*|\s+-\s+", wine_name)[0].strip()
+    nom = re.sub(r"(19|20)\d{2}", "", nom).strip()
+
+    # Appellation entre le 1er " - " et AOP/IGP/AOC/Vin de France
+    app_m = re.search(r"-\s*([\w\s\-]+?)\s*(?:AOP|IGP|AOC|Vin de France)", wine_name, re.I)
+    appellation = app_m.group(1).strip() if app_m else ""
+
+    parts = [p for p in [nom, appellation] if p and p.lower() not in nom.lower() or p == nom]
+    parts.append("vivino rating")
+    return " ".join(p for p in parts if p)
+
+
+def parse_vivino_snippet(url: str, snippet: str, wine_vintage: int | None) -> dict | None:
+    """
+    Extrait note, nb avis et vérifie le millésime depuis un snippet Google/DDG.
+    Pattern note  : "4.2" ou "4.2/5" ou "4,2"
+    Pattern avis  : "1 234 ratings" / "1234 avis" / "1,234 ratings"
+    """
+    if "vivino.com" not in url:
+        return None
+
+    # Note
+    rating_m = re.search(r"\b([2-4][.,]\d)\s*(?:/\s*5)?\b", snippet)
+    if not rating_m:
+        return None
+    try:
+        rating = float(rating_m.group(1).replace(",", "."))
+    except ValueError:
+        return None
+    if not (2.5 <= rating <= 5.0):
+        return None
+
+    # Nombre d'avis
+    reviews_m = re.search(r"([\d\s,\.]+)\s*(?:ratings?|avis|notes?)\b", snippet, re.I)
+    reviews = 0
+    if reviews_m:
+        try:
+            reviews = int(re.sub(r"[\s,\.]", "", reviews_m.group(1)))
+        except ValueError:
+            pass
+
+    # Millésime dans le snippet
+    vintage_in_snippet = None
+    vm = re.search(r"\b(19[5-9]\d|20[0-3]\d)\b", snippet)
+    if vm:
+        vintage_in_snippet = int(vm.group(1))
+
+    # Vérification millésime : est-ce que le vin trouvé correspond bien ?
+    vintage_match = None
+    if wine_vintage and vintage_in_snippet:
+        vintage_match = (wine_vintage == vintage_in_snippet)
+    elif wine_vintage and not vintage_in_snippet:
+        vintage_match = None  # on ne sait pas
+    else:
+        vintage_match = True  # pas d'année dans le nom Leclerc → pas de vérif
+
+    return {
+        "rating":          round(rating, 1),
+        "ratings_count":   reviews,
+        "vivino_url":      url,
+        "vintage_match":   vintage_match,    # True / False / None
+        "vivino_year":     vintage_in_snippet,
+    }
+
+
+def search_vivino_ddg(wine_name: str, wine_vintage: int | None) -> dict | None:
+    """
+    Recherche Vivino via DuckDuckGo (bibliothèque duckduckgo-search).
+    Lot de 3 résultats, on filtre sur vivino.com.
+    """
+    from duckduckgo_search import DDGS
+
+    query = build_vivino_query(wine_name)
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
+    except Exception:
+        return None
+
+    for r in results:
+        url     = r.get("href", "") or r.get("url", "")
+        snippet = r.get("body", "") or r.get("snippet", "")
+        parsed  = parse_vivino_snippet(url, snippet, wine_vintage)
+        if parsed:
+            return parsed
+
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SELENIUM SCRAPER (Leclerc uniquement)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_selenium_driver():
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service
     from selenium.webdriver.chrome.options import Options
+    import os
 
     opts = Options()
     opts.add_argument("--headless")
@@ -156,102 +295,23 @@ def get_selenium_driver():
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
 
-    # Binaire Chromium — ordre de priorité pour Streamlit Cloud (Ubuntu)
-    for binary in [
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-    ]:
-        if __import__("os").path.exists(binary):
+    for binary in ["/usr/bin/chromium", "/usr/bin/chromium-browser",
+                   "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"]:
+        if os.path.exists(binary):
             opts.binary_location = binary
             break
 
-    # Chromedriver
-    for drv in [
-        "/usr/bin/chromedriver",
-        "/usr/lib/chromium/chromedriver",
-        "/usr/lib/chromium-browser/chromedriver",
-    ]:
-        if __import__("os").path.exists(drv):
-            return webdriver.Chrome(
-                service=Service(drv), options=opts
-            )
+    for drv in ["/usr/bin/chromedriver", "/usr/lib/chromium/chromedriver",
+                "/usr/lib/chromium-browser/chromedriver"]:
+        if os.path.exists(drv):
+            from selenium.webdriver.chrome.service import Service
+            return webdriver.Chrome(service=Service(drv), options=opts)
 
-    # Fallback : Selenium le trouve dans le PATH
     return webdriver.Chrome(options=opts)
 
 
-def clean_name_for_vivino(wine_name: str) -> str:
-    """Nettoie le nom Leclerc pour la recherche Vivino."""
-    clean = re.sub(r"\s*-\s*(AOP|IGP|AOC|Vin de France|Rouge|Blanc|Rosé|Moelleux).*", "", wine_name, flags=re.I)
-    clean = re.sub(r",?\s*\b(19|20)\d{2}\b", "", clean)
-    clean = re.sub(r"\s*(AOP|IGP|AOC)\b", "", clean, flags=re.I)
-    clean = re.sub(r"[\s,\-]+$", "", clean).strip()
-    return " ".join(clean.split()[:6])
-
-
-def search_vivino_via_selenium(driver, wine_name: str) -> dict | None:
-    """
-    Interroge l'API Vivino via le driver Selenium déjà ouvert.
-    Le navigateur fait la requête fetch() — contourne le blocage IP des datacenters.
-    """
-    query = clean_name_for_vivino(wine_name)
-    if not query:
-        return None
-
-    import json as _json
-    url = (
-        "https://www.vivino.com/api/explore/explore"
-        f"?language=fr&wine_type_ids[]=1&q={requests.utils.quote(query)}"
-        "&order_by=match&per_page=3"
-    )
-    js = """
-    const [url, resolve] = arguments;
-    fetch(url, {
-        headers: {
-            'Accept': 'application/json',
-            'X-Requested-With': 'XMLHttpRequest'
-        }
-    })
-    .then(r => r.json())
-    .then(d => resolve(JSON.stringify(d)))
-    .catch(() => resolve(null));
-    """
-    try:
-        result = driver.execute_async_script(js, url)
-        if not result:
-            return None
-        data    = _json.loads(result)
-        records = data.get("explore_vintage", {}).get("records", [])
-        if not records:
-            return None
-        best    = records[0]
-        vintage = best.get("vintage", {})
-        wine    = vintage.get("wine", {})
-        stats   = vintage.get("statistics") or wine.get("statistics") or {}
-        rating  = float(stats.get("ratings_average") or 0)
-        count   = int(stats.get("ratings_count") or 0)
-        if not rating:
-            return None
-        seo = wine.get("seo_name", "")
-        return {
-            "vivino_name":   wine.get("name", ""),
-            "vivino_year":   vintage.get("year", ""),
-            "rating":        round(rating, 2),
-            "ratings_count": count,
-            "vivino_url":    f"https://www.vivino.com{seo}" if seo else "",
-        }
-    except Exception:
-        return None
-
-
-def scrape_with_selenium(log=None) -> list[dict]:
-    """
-    1. Scrape Leclerc Blagnac (toutes les pages)
-    2. Enrichit chaque vin avec les notes Vivino
-    Tout se fait dans le même driver Selenium — pas de blocage IP.
-    """
+def scrape_leclerc(wine_type_slug: str, log=None) -> list[dict]:
+    """Scrape toutes les pages Leclerc pour un type de vin donné."""
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
@@ -262,9 +322,8 @@ def scrape_with_selenium(log=None) -> list[dict]:
     seen_eans = set()
 
     try:
-        # ── Étape 1 : Leclerc ───────────────────────────────────────────────
         if log: log("🌐 Chargement page 1 Leclerc…")
-        driver.get(f"{LECLERC_BASE}#oaf-sign-code={STORE_CODE}")
+        driver.get(leclerc_url(wine_type_slug, 1))
         try:
             WebDriverWait(driver, 25).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card"))
@@ -285,7 +344,7 @@ def scrape_with_selenium(log=None) -> list[dict]:
 
         for p in range(2, nb_pages + 1):
             if log: log(f"🌐 Page {p}/{nb_pages}…")
-            driver.get(f"{LECLERC_BASE}?page={p}#oaf-sign-code={STORE_CODE}")
+            driver.get(leclerc_url(wine_type_slug, p))
             try:
                 WebDriverWait(driver, 20).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card"))
@@ -302,33 +361,51 @@ def scrape_with_selenium(log=None) -> list[dict]:
             all_wines.extend(new)
             if log: log(f"✅ Page {p} : {len(new)} vins (total {len(all_wines)})")
 
-        # ── Étape 2 : Vivino via le même navigateur ──────────────────────────
-        if log: log(f"🍷 Recherche des notes Vivino ({len(all_wines)} vins)…")
-
-        # Naviguer d'abord sur Vivino pour initialiser les cookies de session
-        driver.get("https://www.vivino.com/explore")
-        time.sleep(2)
-
-        for i, wine in enumerate(all_wines):
-            vd = search_vivino_via_selenium(driver, wine["name"])
-            if vd:
-                wine.update(vd)
-                wine["ratio"] = (
-                    round((vd["rating"] / wine["price"]) * 10, 3)
-                    if wine["price"] > 0 else 0
-                )
-            else:
-                wine.update({"rating": None, "ratings_count": 0,
-                              "ratio": 0, "vivino_name": "", "vivino_url": ""})
-            if log and (i + 1) % 10 == 0:
-                found = sum(1 for w in all_wines[:i+1] if w.get("rating"))
-                log(f"  🍷 {i+1}/{len(all_wines)} — {found} notes trouvées")
-            time.sleep(0.3)  # respecter Vivino
-
     finally:
         driver.quit()
 
     return all_wines
+
+
+def enrich_with_vivino(wines: list[dict], log=None) -> list[dict]:
+    """
+    Enrichit les vins avec les notes Vivino via DuckDuckGo.
+    Traitement par lots de 5 en parallèle (même logique que l'ancien code JS).
+    """
+    BATCH_SIZE = 5
+    total      = len(wines)
+    found      = 0
+
+    for i in range(0, total, BATCH_SIZE):
+        batch = wines[i : i + BATCH_SIZE]
+
+        with ThreadPoolExecutor(max_workers=BATCH_SIZE) as ex:
+            futures = {
+                ex.submit(search_vivino_ddg, w["name"], w.get("vintage")): idx
+                for idx, w in enumerate(batch)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                vd  = future.result()
+                wine = batch[idx]
+                if vd:
+                    wine.update(vd)
+                    wine["ratio"] = (
+                        round((vd["rating"] / wine["price"]) * 10, 3)
+                        if wine["price"] > 0 else 0
+                    )
+                    found += 1
+                else:
+                    wine.update({
+                        "rating": None, "ratings_count": 0, "ratio": 0,
+                        "vivino_url": "", "vivino_year": None, "vintage_match": None,
+                    })
+
+        done = min(i + BATCH_SIZE, total)
+        if log: log(f"  🍷 {done}/{total} — {found} notes trouvées")
+        time.sleep(0.15)  # pause entre lots
+
+    return wines
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -336,30 +413,42 @@ def scrape_with_selenium(log=None) -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_stars(r: float) -> str:
-    return "".join("★" if r>=i else ("½" if r>=i-.5 else "☆") for i in range(1,6))
+    return "".join("★" if r >= i else ("½" if r >= i - .5 else "☆") for i in range(1, 6))
 
 
 def wine_card_html(wine: dict, rank: int, max_ratio: float) -> str:
     card_cls  = {1:"top1", 2:"top2", 3:"top3"}.get(rank, "")
-    rank_icon = {1:"🥇",   2:"🥈",   3:"🥉"  }.get(rank, f"#{rank}")
+    # Ajouter indicateur millésime non confirmé
+    vintage_warn = wine.get("vintage_match") is False
+    if vintage_warn:
+        card_cls = (card_cls + " vintage-warn").strip()
+
+    rank_icon = {1:"🥇", 2:"🥈", 3:"🥉"}.get(rank, f"#{rank}")
 
     name_html = (
         f'<a href="{wine["url"]}" target="_blank" style="color:#1A0810;text-decoration:none">'
         f'{wine["name"]}</a>' if wine.get("url") else wine["name"]
     )
-    vivino_sub = ""
-    if wine.get("vivino_name") and wine["vivino_name"] != wine["name"]:
-        vivino_sub = (f'<div class="wine-vivino-name">'
-                      f'Vivino : {wine["vivino_name"]} {wine.get("vivino_year","")}'
-                      f'</div>')
+
+    # Sous-titre : Vivino name + alerte millésime
+    subs = []
+    if wine.get("vivino_year") and wine.get("vintage") and wine["vivino_year"] != wine["vintage"]:
+        subs.append(
+            f'<span class="badge badge-year">⚠️ Vivino trouve {wine["vivino_year"]} '
+            f'(vous avez {wine["vintage"]})</span>'
+        )
+    elif wine.get("vivino_url"):
+        pass  # pas d'alerte, millésime OK ou inconnu
+
+    vivino_sub = "".join(subs)
 
     rating = wine.get("rating")
     if rating:
-        cnt = f"{wine.get('ratings_count',0):,}".replace(",","\u202f")
+        cnt = f"{wine.get('ratings_count', 0):,}".replace(",", "\u202f")
         rating_html = (
             f'<div class="wine-rating">'
             f'<div class="stars">{build_stars(rating)}</div>'
-            f'<div class="rating-num">{rating:.2f} / 5</div>'
+            f'<div class="rating-num">{rating:.1f} / 5</div>'
             f'<div class="reviews">{cnt} avis</div>'
             f'</div>'
         )
@@ -378,19 +467,22 @@ def wine_card_html(wine: dict, rank: int, max_ratio: float) -> str:
     )
 
     badges = ""
-    if ratio > 0 and rank <= 5:  badges += '<span class="badge badge-deal">🔥 Top ratio</span> '
-    if rating and rating >= 4.2: badges += '<span class="badge badge-top">★ Top noté</span> '
+    if ratio > 0 and rank <= 5:  badges += '<span class="badge badge-deal">🔥 Top ratio</span>'
+    if rating and rating >= 4.2: badges += '<span class="badge badge-top">★ Top noté</span>'
     if wine.get("vivino_url"):
-        badges += (f'<a href="{wine["vivino_url"]}" target="_blank" '
-                   f'style="font-size:.68rem;color:#8B6B72;text-decoration:none">→ Vivino</a>')
+        badges += (
+            f'<a href="{wine["vivino_url"]}" target="_blank" '
+            f'style="font-size:.68rem;color:#8B6B72;text-decoration:none;margin-left:.3rem">→ Vivino</a>'
+        )
 
-    price_fmt = f'{wine["price"]:.2f}'.replace(".",",") + " €"
+    price_fmt = f'{wine["price"]:.2f}'.replace(".", ",") + " €"
+    vintage_tag = f' <span style="color:#8B6B72;font-size:.72rem">{wine["vintage"]}</span>' if wine.get("vintage") else ""
 
     return (
         f'<div class="wine-card {card_cls}">'
         f'<div class="wine-rank">{rank_icon}</div>'
         f'<div class="wine-info">'
-        f'<div class="wine-name-text">{name_html}</div>'
+        f'<div class="wine-name-text">{name_html}{vintage_tag}</div>'
         f'{vivino_sub}'
         f'<div style="margin-top:.3rem">{badges}</div>'
         f'</div>'
@@ -410,12 +502,21 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="subtitle">Comparateur qualité / prix — Vins rouges disponibles en magasin</div>',
+    '<div class="subtitle">Comparateur qualité / prix — disponible en magasin</div>',
     unsafe_allow_html=True,
 )
 st.markdown("<br>", unsafe_allow_html=True)
 
+# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
+    st.markdown("### 🍾 Type de vin")
+    wine_type_label = st.selectbox(
+        "Catégorie",
+        list(WINE_TYPES.keys()),
+        label_visibility="collapsed",
+    )
+    wine_type_slug = WINE_TYPES[wine_type_label]
+
     st.markdown("### 🔧 Filtres")
     search     = st.text_input("🔍 Recherche", placeholder="Bordeaux, Rhône, Corbières…")
     price_max  = st.slider("💶 Prix max (€)", 0, 200, 200, step=5)
@@ -424,6 +525,7 @@ with st.sidebar:
         options=[0.0, 3.0, 3.5, 3.8, 4.0, 4.2, 4.5], value=0.0,
         format_func=lambda x: "Toutes" if x == 0 else f"≥ {x} ★",
     )
+    only_vintage_ok = st.checkbox("✅ Millésime confirmé uniquement", value=False)
     sort_by = st.selectbox("↕ Trier par", [
         "Meilleur ratio ★/€", "Meilleure note", "Prix croissant", "Prix décroissant",
     ])
@@ -431,22 +533,29 @@ with st.sidebar:
     scrape_btn = st.button("🔄 Lancer / Rafraîchir", use_container_width=True, type="primary")
     st.caption(f"📍 Leclerc Blagnac · magasin {STORE_CODE}")
 
+# ── Session state ──────────────────────────────────────────────────────────────
 if "wines" not in st.session_state:
+    st.session_state.wines = []
+if "loaded_type" not in st.session_state:
+    st.session_state.loaded_type = None
+
+# Recharger si on change de type de vin
+if wine_type_slug != st.session_state.loaded_type:
     st.session_state.wines = []
 
 if scrape_btn or not st.session_state.wines:
     st.session_state.wines = []
 
-    with st.status("🔍 Chargement en cours…", expanded=True) as status:
+    with st.status(f"🔍 Chargement {wine_type_label}…", expanded=True) as status:
         log_box = st.empty()
         logs    = []
         def log(msg):
             logs.append(msg)
             log_box.markdown("\n\n".join(logs[-6:]))
 
-        # 1. Scraping Selenium
+        # 1. Scraping Leclerc
         try:
-            raw_wines = scrape_with_selenium(log=log)
+            raw_wines = scrape_leclerc(wine_type_slug, log=log)
         except Exception as e:
             st.error(
                 f"❌ Erreur Selenium : {e}\n\n"
@@ -458,13 +567,29 @@ if scrape_btn or not st.session_state.wines:
             st.error("Aucun produit récupéré — réessayez dans quelques instants.")
             st.stop()
 
+        log(f"✅ {len(raw_wines)} vins trouvés")
+
+        # 2. Notes Vivino via DuckDuckGo
+        log("🍷 Recherche des notes Vivino (DuckDuckGo)…")
+        raw_wines = enrich_with_vivino(raw_wines, log=log)
+
         n_rated = sum(1 for w in raw_wines if w.get("rating"))
-        log(f"✅ {len(raw_wines)} vins Blagnac — {n_rated} notes Vivino trouvées")
-        st.session_state.wines = raw_wines
-        status.update(label=f"✅ {len(raw_wines)} vins analysés !", state="complete")
+        n_vintage_ok  = sum(1 for w in raw_wines if w.get("vintage_match") is True)
+        n_vintage_bad = sum(1 for w in raw_wines if w.get("vintage_match") is False)
+
+        log(f"✅ {n_rated}/{len(raw_wines)} notes Vivino")
+        if n_vintage_bad:
+            log(f"⚠️ {n_vintage_bad} millésimes non confirmés")
+
+        st.session_state.wines       = raw_wines
+        st.session_state.loaded_type = wine_type_slug
+        status.update(
+            label=f"✅ {len(raw_wines)} vins analysés — {n_rated} notes Vivino",
+            state="complete",
+        )
 
 
-# ── Affichage ─────────────────────────────────────────────────────────────────
+# ── Affichage ──────────────────────────────────────────────────────────────────
 wines = st.session_state.wines
 
 if wines:
@@ -472,11 +597,9 @@ if wines:
         w for w in wines
         if w["price"] <= price_max
         and (rating_min == 0 or (w.get("rating") and w["rating"] >= rating_min))
-        and (
-            not search
-            or search.lower() in w["name"].lower()
-            or search.lower() in (w.get("vivino_name") or "").lower()
-        )
+        and (not search
+             or search.lower() in w["name"].lower())
+        and (not only_vintage_ok or w.get("vintage_match") is True)
     ]
 
     sort_key = {
@@ -487,6 +610,7 @@ if wines:
     }
     filtered.sort(key=sort_key[sort_by])
 
+    # Métriques
     c1, c2, c3, c4 = st.columns(4)
     with c1: st.metric("🍷 Vins affichés", len(filtered))
     with c2:
@@ -495,26 +619,39 @@ if wines:
     with c3:
         rated = [w for w in filtered if w.get("rating")]
         avg_r = sum(w["rating"] for w in rated) / max(len(rated), 1) if rated else 0
-        st.metric("⭐ Note moy. Vivino", f"★ {avg_r:.2f}" if rated else "—")
+        st.metric("⭐ Note moy. Vivino", f"★ {avg_r:.1f}" if rated else "—")
     with c4:
         best = max(filtered, key=lambda x: x.get("ratio") or 0, default=None)
         st.metric("🏆 Meilleur ratio", f"{best['ratio']:.2f}" if best and best.get("ratio") else "—")
 
+    # Export CSV
     with st.expander("📥 Exporter en CSV"):
         df = pd.DataFrame([{
-            "Nom":         w["name"],
-            "Prix (€)":    w["price"],
-            "EAN":         w.get("ean", ""),
-            "Note Vivino": w.get("rating", ""),
-            "Nb avis":     w.get("ratings_count", ""),
-            "Ratio ★/€":  w.get("ratio", ""),
-            "URL Leclerc": w.get("url", ""),
-            "URL Vivino":  w.get("vivino_url", ""),
+            "Nom":              w["name"],
+            "Millésime":        w.get("vintage", ""),
+            "Prix (€)":         w["price"],
+            "EAN":              w.get("ean", ""),
+            "Note Vivino":      w.get("rating", ""),
+            "Nb avis":          w.get("ratings_count", ""),
+            "Millésime Vivino": w.get("vivino_year", ""),
+            "Millésime OK":     w.get("vintage_match", ""),
+            "Ratio ★/€":       w.get("ratio", ""),
+            "URL Leclerc":      w.get("url", ""),
+            "URL Vivino":       w.get("vivino_url", ""),
         } for w in filtered])
         st.download_button(
             "⬇️ Télécharger CSV",
             df.to_csv(index=False, sep=";").encode("utf-8-sig"),
-            "vins_leclerc_blagnac.csv", "text/csv",
+            f"vins_leclerc_{wine_type_slug}.csv", "text/csv",
+        )
+
+    # Légende millésime
+    n_bad = sum(1 for w in filtered if w.get("vintage_match") is False)
+    if n_bad:
+        st.warning(
+            f"⚠️ **{n_bad} vins** ont un millésime différent entre Leclerc et Vivino "
+            f"(bordure orange). Vérifiez manuellement sur Vivino.",
+            icon=None,
         )
 
     st.divider()
@@ -524,4 +661,4 @@ if wines:
         st.markdown(wine_card_html(wine, i + 1, max_ratio), unsafe_allow_html=True)
 
 else:
-    st.info("👈 Cliquez sur **Lancer / Rafraîchir** dans le panneau gauche.")
+    st.info("👈 Sélectionnez un type de vin et cliquez sur **Lancer / Rafraîchir**.")
