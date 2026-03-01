@@ -193,139 +193,40 @@ def build_vivino_query(wine_name: str) -> str:
     return " ".join(p for p in parts if p)
 
 
-def parse_vivino_rendered_html(html: str) -> tuple[float, int] | None:
-    """
-    Extrait (note, nb_avis) depuis le HTML rendu d'une page Vivino.
-    Couvre : JSON-LD, data-attributes, classes CSS hashées, texte brut.
-    """
-    # 1. JSON-LD aggregateRating
-    m = re.search(r'"ratingValue"\s*:\s*"?([\d.,]+)"?', html)
-    if m:
-        try:
-            r = round(float(m.group(1).replace(",", ".")), 1)
-            c_m = re.search(r'"(?:review|rating)Count"\s*:\s*"?(\d+)"?', html)
-            if 2.5 <= r <= 5.0:
-                return (r, int(c_m.group(1)) if c_m else 0)
-        except ValueError:
-            pass
-
-    # 2. data-average attribute
-    m = re.search(r'data-average="([\d.,]+)"', html)
-    if m:
-        try:
-            r = round(float(m.group(1).replace(",", ".")), 1)
-            c_m = re.search(r'data-ratings-count="(\d+)"', html)
-            if 2.5 <= r <= 5.0:
-                return (r, int(c_m.group(1)) if c_m else 0)
-        except ValueError:
-            pass
-
-    # 3. Classes CSS hashées Vivino (vivinoRating_averageValue__xxxx)
-    m = re.search(r'vivinoRating_averageValue[^>]*>([\d.,]+)<', html)
-    if m:
-        try:
-            r = round(float(m.group(1).strip().replace(",", ".")), 1)
-            c_m = re.search(r'vivinoRating_numRatings[^>]*>([\d\s\xa0]+)', html)
-            count = int(re.sub(r"[^\d]", "", c_m.group(1)) or 0) if c_m else 0
-            if 2.5 <= r <= 5.0:
-                return (r, count)
-        except ValueError:
-            pass
-
-    # 4. "3,9 / 5" ou "3.9/5" dans le texte
-    m = re.search(r"(\d[.,]\d)\s*/\s*5", html)
-    if m:
-        try:
-            r = round(float(m.group(1).replace(",", ".")), 1)
-            c_m = re.search(r"(\d[\d\s\xa0]+)\s*(?:avis|notes?|ratings?)", html, re.I)
-            count = int(re.sub(r"[^\d]", "", c_m.group(1))) if c_m else 0
-            if 2.5 <= r <= 5.0:
-                return (r, count)
-        except ValueError:
-            pass
-
-    return None
-
-
-def search_vivino_selenium(driver, wine_name: str, wine_vintage: int | None) -> dict | None:
-    """
-    Cherche un vin sur Vivino via Selenium (vrai navigateur = pas de blocage).
-    Charge la page de recherche Vivino et parse le HTML rendu.
-    """
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-
-    query = build_vivino_query(wine_name)
-    if not query:
+def parse_explore_response(data: dict, wine_vintage: int | None) -> dict | None:
+    """Parse la réponse de l'API Vivino explore/explore."""
+    records = data.get("explore_vintage", {}).get("records", [])
+    if not records:
         return None
-
-    search_url = (
-        "https://www.vivino.com/search/wines"
-        f"?q={requests.utils.quote(query)}&language=fr"
-    )
-
-    try:
-        driver.get(search_url)
-        try:
-            WebDriverWait(driver, 8).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR,
-                    "[class*='wineName'], [class*='wine-card'], "
-                    "[class*='averageValue'], .average__number"
-                ))
-            )
-        except Exception:
-            pass
-        time.sleep(1.5)
-
-        html = driver.page_source
-        result = parse_vivino_rendered_html(html)
-        if not result:
-            return None
-
-        rating, count = result
-
-        # URL du premier résultat vin
-        soup = BeautifulSoup(html, "html.parser")
-        best_url = ""
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if re.search(r"/wines/[\w-]+", href) and "search" not in href:
-                best_url = href if href.startswith("http") else f"https://www.vivino.com{href}"
-                break
-
-        # Millésime Vivino (depuis l'URL ou le texte de page)
-        vivino_year = None
-        if best_url:
-            ym = re.search(r"-(20[0-3]\d|19[5-9]\d)(?:-|$)", best_url)
-            if ym:
-                vivino_year = int(ym.group(1))
-        if not vivino_year:
-            ym2 = re.search(r"\b(20[0-3]\d|19[5-9]\d)\b", html[:3000])
-            if ym2:
-                vivino_year = int(ym2.group(1))
-
-        vintage_match = None
-        if wine_vintage and vivino_year:
-            vintage_match = (wine_vintage == vivino_year)
-        elif not wine_vintage:
-            vintage_match = True
-
-        return {
-            "rating":          rating,
-            "ratings_count":   count,
-            "vivino_url":      best_url,
-            "vivino_year":     vivino_year,
-            "vintage_match":   vintage_match,
-        }
-
-    except Exception:
+    best    = records[0]
+    vintage = best.get("vintage", {})
+    wine    = vintage.get("wine", {})
+    stats   = vintage.get("statistics") or wine.get("statistics") or {}
+    rating  = float(stats.get("ratings_average") or 0)
+    count   = int(stats.get("ratings_count") or 0)
+    if not (2.5 <= rating <= 5.0):
         return None
-
+    vivino_year = vintage.get("year")
+    seo = wine.get("seo_name", "")
+    vintage_match = None
+    if wine_vintage and vivino_year:
+        vintage_match = (int(wine_vintage) == int(vivino_year))
+    elif not wine_vintage:
+        vintage_match = True
+    return {
+        "rating":          round(rating, 1),
+        "ratings_count":   count,
+        "vivino_url":      f"https://www.vivino.com{seo}" if seo else "",
+        "vivino_year":     vivino_year,
+        "vintage_match":   vintage_match,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SELENIUM SCRAPER (Leclerc uniquement)
+# SELENIUM — Leclerc + Vivino dans le même navigateur
+# Approche du repo aptash/vivino-api :
+#   naviguer sur vivino.com, lire le csrf-token, appeler l'API via fetch()
+#   depuis le contexte de la page (même origine → pas de CORS)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_selenium_driver():
@@ -357,18 +258,57 @@ def get_selenium_driver():
     for drv in ["/usr/bin/chromedriver", "/usr/lib/chromium/chromedriver",
                 "/usr/lib/chromium-browser/chromedriver"]:
         if os.path.exists(drv):
-            from selenium.webdriver.chrome.service import Service
             return webdriver.Chrome(service=Service(drv), options=opts)
 
     return webdriver.Chrome(options=opts)
 
 
+def search_vivino_from_page(driver, query: str, wine_vintage: int | None) -> dict | None:
+    """
+    Appelle l'API Vivino via fetch() depuis le contexte du navigateur déjà sur vivino.com.
+    Même approche que aptash/vivino-api (Puppeteer → page.evaluate + fetch + csrf-token).
+    """
+    import json as _json
+    import urllib.parse
+
+    encoded = urllib.parse.quote(query)
+    url = (
+        f"https://www.vivino.com/api/explore/explore"
+        f"?language=fr&wine_type_ids[]=1&q={encoded}&order_by=match&per_page=3"
+    )
+
+    js = """
+    const [url, resolve] = arguments;
+    const csrf = document.querySelector('[name="csrf-token"]')?.content || '';
+    fetch(url, {
+        headers: {
+            'content-type': 'application/json',
+            'x-csrf-token': csrf,
+            'accept': 'application/json',
+        }
+    })
+    .then(r => r.json())
+    .then(d => resolve(JSON.stringify(d)))
+    .catch(e => resolve(JSON.stringify({error: e.toString()})));
+    """
+
+    try:
+        result = driver.execute_async_script(js, url)
+        if not result:
+            return None
+        data = _json.loads(result)
+        if "error" in data:
+            return None
+        return parse_explore_response(data, wine_vintage)
+    except Exception:
+        return None
+
+
 def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
     """
-    Garde le driver Selenium ouvert pour :
-    1. Scraper Leclerc (toutes les pages)
-    2. Enrichir chaque vin avec les notes Vivino (pages de recherche Vivino)
-    Tout dans le même navigateur — aucun blocage possible.
+    1. Scrape Leclerc (Selenium)
+    2. Navigue sur vivino.com pour obtenir le CSRF token
+    3. Pour chaque vin : appelle l'API Vivino via fetch() depuis la page vivino.com
     """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
@@ -381,7 +321,7 @@ def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
 
     try:
         # ── Étape 1 : Leclerc ───────────────────────────────────────────────
-        if log: log("🌐 Chargement page 1 Leclerc…")
+        if log: log("🌐 Chargement Leclerc…")
         driver.get(leclerc_url(wine_type_slug, 1))
         try:
             WebDriverWait(driver, 25).until(
@@ -394,7 +334,6 @@ def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
         html     = driver.page_source
         wines_p1 = parse_cards_from_html(html)
         nb_pages = min(get_nb_pages(html), MAX_PAGES)
-
         for w in wines_p1:
             if w["ean"] not in seen_eans:
                 seen_eans.add(w["ean"])
@@ -420,9 +359,44 @@ def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
             all_wines.extend(new)
             if log: log(f"✅ Page {p} : {len(new)} vins (total {len(all_wines)})")
 
-        # ── Étape 2 : Vivino (même driver) ──────────────────────────────────
-        if log: log(f"🍷 Recherche notes Vivino ({len(all_wines)} vins)…")
-        all_wines = enrich_with_vivino(all_wines, driver, log=log)
+        # ── Étape 2 : Naviguer sur vivino.com pour le CSRF token ─────────────
+        if log: log("🍷 Connexion à Vivino…")
+        driver.get("https://www.vivino.com/explore?language=fr")
+        try:
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, '[name="csrf-token"]')),
+            )
+        except Exception:
+            pass
+        time.sleep(2)
+
+        csrf = driver.execute_script(
+            "return document.querySelector('[name=\"csrf-token\"]')?.content || ''"
+        )
+        if log: log(f"  ✅ CSRF token: {'présent' if csrf else 'absent (continue quand même)'}")
+
+        # ── Étape 3 : Enrichissement Vivino ─────────────────────────────────
+        total = len(all_wines)
+        found = 0
+        EMPTY = {"rating": None, "ratings_count": 0, "ratio": 0,
+                 "vivino_url": "", "vivino_year": None, "vintage_match": None}
+
+        for i, wine in enumerate(all_wines):
+            query = build_vivino_query(wine["name"])
+            vd    = search_vivino_from_page(driver, query, wine.get("vintage"))
+            if vd:
+                wine.update(vd)
+                wine["ratio"] = (
+                    round((vd["rating"] / wine["price"]) * 10, 3)
+                    if wine["price"] > 0 else 0
+                )
+                found += 1
+            else:
+                wine.update(EMPTY)
+
+            if (i + 1) % 5 == 0 or i == total - 1:
+                if log: log(f"  🍷 {i+1}/{total} — {found} notes trouvées")
+            time.sleep(0.3)
 
     finally:
         driver.quit()
@@ -430,42 +404,6 @@ def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
     return all_wines
 
 
-def enrich_with_vivino(wines: list[dict], driver, log=None) -> list[dict]:
-    """
-    Enrichit les vins avec Vivino via le driver Selenium existant.
-    Charge chaque page de recherche Vivino — vrai navigateur, aucun blocage.
-    """
-    total = len(wines)
-    found = 0
-    EMPTY = {
-        "rating": None, "ratings_count": 0, "ratio": 0,
-        "vivino_url": "", "vivino_year": None, "vintage_match": None,
-    }
-
-    for i, wine in enumerate(wines):
-        vd = search_vivino_selenium(driver, wine["name"], wine.get("vintage"))
-        if vd and vd.get("rating"):
-            wine.update(vd)
-            wine["ratio"] = (
-                round((vd["rating"] / wine["price"]) * 10, 3)
-                if wine["price"] > 0 else 0
-            )
-            found += 1
-        else:
-            wine.update(EMPTY)
-
-        if (i + 1) % 5 == 0 or i == total - 1:
-            if log:
-                log(f"  🍷 {i+1}/{total} — {found} notes trouvées")
-
-        time.sleep(0.5)
-
-    return wines
-
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # AFFICHAGE
 # ─────────────────────────────────────────────────────────────────────────────
 
