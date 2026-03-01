@@ -10,7 +10,10 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import time
+import json
 import pandas as pd
+from pathlib import Path
+from datetime import datetime
 
 st.set_page_config(
     page_title="Cave Leclerc Blagnac × Vivino",
@@ -24,6 +27,12 @@ st.set_page_config(
 
 STORE_CODE = "1431"
 MAX_PAGES  = 10
+
+# Cache
+CACHE_DIR        = Path(__file__).parent / ".cache"
+CACHE_DIR.mkdir(exist_ok=True)
+# Vivino : pas de TTL — refresh manuel uniquement
+LECLERC_CACHE_TTL = 6 * 3600       # 6h — le stock peut changer
 
 # Types de vins disponibles sur Leclerc
 WINE_TYPES = {
@@ -58,6 +67,7 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 }
 .wine-card.top1 { border-left-color:#C9A84C; background:#fffdf4; }
 .wine-card.top2 { border-left-color:#9C9C9C; }
+.wine-card.unavailable { opacity:0.55; filter:grayscale(40%); }
 .wine-card.top3 { border-left-color:#CD7F32; }
 .wine-card.vintage-warn { border-right: 3px solid #f59e0b; }
 .wine-rank { font-family:'DM Mono',monospace; font-size:1.3rem; min-width:2.5rem; text-align:center; }
@@ -173,6 +183,79 @@ def get_nb_pages(html: str) -> int:
 #   → on extrait note + avis depuis le snippet
 #   → on vérifie le millésime
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# CACHE — Leclerc (stock + prix) et Vivino (notes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _vivino_cache_path() -> Path:
+    return CACHE_DIR / "vivino.json"
+
+def _leclerc_cache_path(slug: str) -> Path:
+    return CACHE_DIR / f"leclerc_{slug}.json"
+
+def load_vivino_cache() -> dict:
+    """Charge le cache Vivino. Clé = query normalisée, valeur = {rating, ...}"""
+    p = _vivino_cache_path()
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+def save_vivino_cache(cache: dict) -> None:
+    try:
+        _vivino_cache_path().write_text(
+            json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+def load_leclerc_cache(slug: str) -> dict | None:
+    """Retourne le cache Leclerc si valide (< TTL), sinon None."""
+    p = _leclerc_cache_path(slug)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        age  = time.time() - data.get("cached_at", 0)
+        if age < LECLERC_CACHE_TTL:
+            return data
+    except Exception:
+        pass
+    return None
+
+def save_leclerc_cache(slug: str, wines: list[dict]) -> None:
+    data = {
+        "cached_at": time.time(),
+        "slug":      slug,
+        "wines":     wines,
+    }
+    try:
+        _leclerc_cache_path(slug).write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+def check_availability(cached_wines: list[dict], current_eans: set) -> list[dict]:
+    """
+    Compare les EANs actuels avec le cache.
+    Marque 'available': False pour les vins absents du Leclerc aujourd'hui.
+    """
+    for w in cached_wines:
+        w["available"] = w.get("ean", "") in current_eans
+    return cached_wines
+
+def fmt_cache_age(cached_at: float) -> str:
+    """Formate l'âge du cache en texte lisible."""
+    age = time.time() - cached_at
+    if age < 60:        return "à l'instant"
+    if age < 3600:      return f"il y a {int(age/60)} min"
+    if age < 86400:     return f"il y a {int(age/3600)} h"
+    return f"il y a {int(age/86400)} j"
+
+
 
 def build_vivino_query(wine_name: str) -> str:
     """
@@ -218,43 +301,46 @@ def build_vivino_query(wine_name: str) -> str:
 
 def parse_vivino_search_html(html: str, wine_vintage: int | None) -> dict | None:
     """
-    Parse les résultats de la page de recherche Vivino (HTML rendu par React).
-    Extrait la note, nb avis, URL et millésime du premier résultat.
+    Parse le HTML rendu de la page de recherche Vivino.
+    Extrait note, nb avis, URL et millésime du premier résultat.
     """
     from bs4 import BeautifulSoup
-
     soup = BeautifulSoup(html, "html.parser")
 
-    # ── Note : plusieurs sélecteurs possibles selon la version de Vivino ──────
+    # ── Note ──────────────────────────────────────────────────────────────────
     rating = None
-    count  = 0
 
-    # 1. Classe hashée React (la plus courante)
+    # 1. Classe React hashée *averageValue*
     for el in soup.find_all(class_=lambda c: c and "averageValue" in c):
         try:
-            rating = round(float(el.get_text(strip=True).replace(",", ".")), 1)
-            if 2.5 <= rating <= 5.0:
+            v = round(float(el.get_text(strip=True).replace(",", ".")), 1)
+            if 2.5 <= v <= 5.0:
+                rating = v
                 break
         except ValueError:
             pass
 
-    # 2. Fallback : attribut data-average
+    # 2. data-average attribute
     if not rating:
         el = soup.find(attrs={"data-average": True})
         if el:
             try:
-                rating = round(float(el["data-average"]), 1)
+                v = round(float(str(el["data-average"]).replace(",", ".")), 1)
+                if 2.5 <= v <= 5.0:
+                    rating = v
             except (ValueError, KeyError):
                 pass
 
-    # 3. Fallback : JSON-LD aggregateRating
+    # 3. JSON-LD / inline JSON
     if not rating:
-        m = re.search(r'"ratingValue"\s*:\s*"?([\d.,]+)"?', html)
+        m = re.search(r'"ratings_average"\s*:\s*([\d.]+)', html)
+        if not m:
+            m = re.search(r'"ratingValue"\s*:\s*"?([\d.,]+)"?', html)
         if m:
             try:
-                rating = round(float(m.group(1).replace(",", ".")), 1)
-                if not (2.5 <= rating <= 5.0):
-                    rating = None
+                v = round(float(m.group(1).replace(",", ".")), 1)
+                if 2.5 <= v <= 5.0:
+                    rating = v
             except ValueError:
                 pass
 
@@ -262,14 +348,30 @@ def parse_vivino_search_html(html: str, wine_vintage: int | None) -> dict | None
         return None
 
     # ── Nb avis ───────────────────────────────────────────────────────────────
-    for el in soup.find_all(class_=lambda c: c and "numRatings" in c):
-        try:
-            count = int(re.sub(r"[^\d]", "", el.get_text(strip=True)) or 0)
-            break
-        except ValueError:
-            pass
+    count = 0
 
-    # ── URL du premier vin ────────────────────────────────────────────────────
+    # 1. Classe React *numRatings*
+    for el in soup.find_all(class_=lambda c: c and "numRatings" in c):
+        digits = re.sub(r"[^\d]", "", el.get_text())
+        if digits:
+            count = int(digits)
+            break
+
+    # 2. Texte "X notes/avis/ratings" dans la page
+    if not count:
+        m = re.search(r"([\d\s\xa0,\.]+)\s*(?:notes?|avis|ratings?)", html, re.I)
+        if m:
+            digits = re.sub(r"[^\d]", "", m.group(1))
+            if digits:
+                count = int(digits)
+
+    # 3. JSON inline ratings_count
+    if not count:
+        m = re.search(r'"ratings_count"\s*:\s*(\d+)', html)
+        if m:
+            count = int(m.group(1))
+
+    # ── URL du premier résultat ───────────────────────────────────────────────
     best_url = ""
     for a in soup.find_all("a", href=True):
         href = a["href"]
@@ -283,7 +385,10 @@ def parse_vivino_search_html(html: str, wine_vintage: int | None) -> dict | None
     if ym:
         vivino_year = int(ym.group(1))
     if not vivino_year:
-        ym2 = re.search(r"\b(20[0-2]\d|19[5-9]\d)\b", html[:5000])
+        # Chercher dans les paramètres year= ou dans le texte
+        ym2 = re.search(r"year[=:]\s*(20[0-2]\d|19[5-9]\d)", html)
+        if not ym2:
+            ym2 = re.search(r"\b(20[0-2]\d|19[5-9]\d)\b", html[:8000])
         if ym2:
             vivino_year = int(ym2.group(1))
 
@@ -336,45 +441,35 @@ def get_selenium_driver():
     return webdriver.Chrome(options=opts)
 
 
-def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
+def scrape_and_enrich(wine_type_slug: str, force_leclerc: bool = False,
+                       force_vivino: bool = False, log=None) -> list[dict]:
     """
-    1. Scrape Leclerc (Selenium)
-    2. Pour chaque vin : charge la page de recherche Vivino avec le MÊME driver
-       → Vrai navigateur, pas de blocage, pas de CORS, pas d'API à reverse-engineer
+    1. Cache Leclerc : si valide et force_leclerc=False, utilise le cache
+       Sinon scrape Leclerc + détecte les vins disparus
+    2. Cache Vivino  : si note en cache et force_vivino=False, réutilise
+       Sinon navigue sur la page de recherche Vivino
     """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
 
-    if log: log("🚀 Démarrage de Chromium…")
-    driver    = get_selenium_driver()
-    all_wines = []
-    seen_eans = set()
+    # ── Charger les caches ───────────────────────────────────────────────────
+    vivino_cache    = load_vivino_cache()
+    leclerc_cached  = load_leclerc_cache(wine_type_slug)
+    now             = time.time()
 
-    try:
-        # ── Étape 1 : Scraping Leclerc ──────────────────────────────────────
-        if log: log("🌐 Chargement Leclerc…")
-        driver.get(leclerc_url(wine_type_slug, 1))
+    # ── Leclerc ─────────────────────────────────────────────────────────────
+    if leclerc_cached and not force_leclerc:
+        # Cache valide : on vérifie quand même la disponibilité actuelle
+        if log: log(f"📦 Cache Leclerc ({fmt_cache_age(leclerc_cached['cached_at'])}) — vérification stock…")
+        cached_wines = leclerc_cached["wines"]
+
+        # Scrape léger (page 1 seulement) pour obtenir les EANs actuels
+        if log: log("🌐 Vérification disponibilité…")
+        current_eans = set()
         try:
-            WebDriverWait(driver, 25).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card"))
-            )
-        except Exception:
-            pass
-        time.sleep(2)
-
-        html     = driver.page_source
-        wines_p1 = parse_cards_from_html(html)
-        nb_pages = min(get_nb_pages(html), MAX_PAGES)
-        for w in wines_p1:
-            if w["ean"] not in seen_eans:
-                seen_eans.add(w["ean"])
-                all_wines.append(w)
-        if log: log(f"✅ Page 1 : {len(wines_p1)} vins — {nb_pages} page(s)")
-
-        for p in range(2, nb_pages + 1):
-            if log: log(f"🌐 Page {p}/{nb_pages}…")
-            driver.get(leclerc_url(wine_type_slug, p))
+            driver = get_selenium_driver()
+            driver.get(leclerc_url(wine_type_slug, 1))
             try:
                 WebDriverWait(driver, 20).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card"))
@@ -382,66 +477,178 @@ def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
             except Exception:
                 pass
             time.sleep(2)
-            wines_p = parse_cards_from_html(driver.page_source)
-            new = [w for w in wines_p if w["ean"] not in seen_eans]
-            if not new:
-                break
-            for w in new:
-                seen_eans.add(w["ean"])
-            all_wines.extend(new)
-            if log: log(f"✅ Page {p} : {len(new)} vins (total {len(all_wines)})")
-
-        # ── Étape 2 : Vivino via recherche dans le navigateur ────────────────
-        if log: log(f"🍷 Recherche Vivino ({len(all_wines)} vins)…")
-        total = len(all_wines)
-        found = 0
-        EMPTY = {"rating": None, "ratings_count": 0, "ratio": 0,
-                 "vivino_url": "", "vivino_year": None, "vintage_match": None}
-
-        for i, wine in enumerate(all_wines):
-            query      = build_vivino_query(wine["name"])
-            vintage    = wine.get("vintage")
-            search_url = (
-                "https://www.vivino.com/search/wines"
-                f"?q={requests.utils.quote(query)}&language=fr"
-            )
-
-            try:
-                driver.get(search_url)
-                # Attendre qu'au moins une note soit rendue
+            html = driver.page_source
+            nb_pages = min(get_nb_pages(html), MAX_PAGES)
+            page1_wines = parse_cards_from_html(html)
+            current_eans = {w["ean"] for w in page1_wines}
+            # Pages suivantes si le cache en avait plus d'une
+            for p in range(2, nb_pages + 1):
+                driver.get(leclerc_url(wine_type_slug, p))
                 try:
-                    WebDriverWait(driver, 8).until(
-                        EC.presence_of_element_located(
-                            (By.CSS_SELECTOR,
-                             "[class*='averageValue'],[class*='average__number'],[data-average]")
-                        )
+                    WebDriverWait(driver, 15).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card"))
                     )
                 except Exception:
                     pass
-                time.sleep(1)
+                time.sleep(1.5)
+                for w in parse_cards_from_html(driver.page_source):
+                    current_eans.add(w["ean"])
+        except Exception as e:
+            if log: log(f"⚠️ Vérification stock échouée : {e}")
+        finally:
+            try: driver.quit()
+            except: pass
 
-                vd = parse_vivino_search_html(driver.page_source, vintage)
-            except Exception:
-                vd = None
+        all_wines = check_availability(cached_wines, current_eans)
+        n_dispo   = sum(1 for w in all_wines if w.get("available", True))
+        n_indispo = len(all_wines) - n_dispo
+        if log: log(f"✅ {n_dispo} dispo, {n_indispo} indisponible(s) à Blagnac")
+        vivino_needed = [w for w in all_wines
+                         if force_vivino or build_vivino_query(w["name"]) not in vivino_cache
+                         ]  # pas de TTL Vivino — refresh manuel
+    else:
+        # Pas de cache ou refresh forcé : scrape complet
+        if log: log("🚀 Démarrage Chromium…")
+        driver    = get_selenium_driver()
+        all_wines = []
+        seen_eans = set()
 
-            if vd:
-                wine.update(vd)
-                wine["ratio"] = (
-                    round((vd["rating"] / wine["price"]) * 10, 3)
-                    if wine["price"] > 0 else 0
+        try:
+            if log: log("🌐 Chargement Leclerc…")
+            driver.get(leclerc_url(wine_type_slug, 1))
+            try:
+                WebDriverWait(driver, 25).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card"))
                 )
-                found += 1
-                if log: log(f"  ✅ {wine['name'][:40]} → {vd['rating']} ({vd['ratings_count']} avis)")
-            else:
-                wine.update(EMPTY)
+            except Exception:
+                pass
+            time.sleep(2)
 
-            if (i + 1) % 10 == 0 or i == total - 1:
-                if log: log(f"  🍷 {i+1}/{total} — {found} notes trouvées")
+            html     = driver.page_source
+            wines_p1 = parse_cards_from_html(html)
+            nb_pages = min(get_nb_pages(html), MAX_PAGES)
+            for w in wines_p1:
+                if w["ean"] not in seen_eans:
+                    seen_eans.add(w["ean"])
+                    all_wines.append(w)
+            if log: log(f"✅ Page 1 : {len(wines_p1)} vins — {nb_pages} page(s)")
 
-            time.sleep(0.5)
+            for p in range(2, nb_pages + 1):
+                if log: log(f"🌐 Page {p}/{nb_pages}…")
+                driver.get(leclerc_url(wine_type_slug, p))
+                try:
+                    WebDriverWait(driver, 20).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card"))
+                    )
+                except Exception:
+                    pass
+                time.sleep(2)
+                wines_p = parse_cards_from_html(driver.page_source)
+                new = [w for w in wines_p if w["ean"] not in seen_eans]
+                if not new:
+                    break
+                for w in new:
+                    seen_eans.add(w["ean"])
+                all_wines.extend(new)
+                if log: log(f"✅ Page {p} : {len(new)} vins (total {len(all_wines)})")
 
-    finally:
-        driver.quit()
+        finally:
+            try: driver.quit()
+            except: pass
+
+        # Tous disponibles (on vient de scraper)
+        for w in all_wines:
+            w["available"] = True
+
+        save_leclerc_cache(wine_type_slug, all_wines)
+        if log: log(f"💾 Cache Leclerc sauvegardé ({len(all_wines)} vins)")
+        vivino_needed = all_wines  # Tous ont besoin de Vivino
+
+    # ── Vivino ───────────────────────────────────────────────────────────────
+    # Injecter les données cache pour les vins déjà connus
+    for wine in all_wines:
+        key = build_vivino_query(wine["name"])
+        cached_v = vivino_cache.get(key)
+        if cached_v and cached_v.get("rating") is not None and not force_vivino:
+            wine.update({k: v for k, v in cached_v.items() if k != "cached_at"})
+            wine["ratio"] = (
+                round((cached_v["rating"] / wine["price"]) * 10, 3)
+                if wine.get("price", 0) > 0 and cached_v.get("rating") else 0
+            )
+        else:
+            # Pas encore en cache Vivino
+            wine.setdefault("rating", None)
+            wine.setdefault("ratings_count", 0)
+            wine.setdefault("ratio", 0)
+            wine.setdefault("vivino_url", "")
+            wine.setdefault("vivino_year", None)
+            wine.setdefault("vintage_match", None)
+
+    # Vins à scraper sur Vivino
+    vivino_todo = [w for w in all_wines
+                   if force_vivino or build_vivino_query(w["name"]) not in vivino_cache
+                   ]  # pas de TTL Vivino — refresh manuel
+
+    if vivino_todo:
+        if log: log(f"🍷 Recherche Vivino ({len(vivino_todo)} vins à scraper)…")
+        driver2 = get_selenium_driver()
+        found   = 0
+        EMPTY   = {"rating": None, "ratings_count": 0, "ratio": 0,
+                   "vivino_url": "", "vivino_year": None, "vintage_match": None}
+
+        try:
+            for i, wine in enumerate(vivino_todo):
+                query      = build_vivino_query(wine["name"])
+                vintage    = wine.get("vintage")
+                search_url = (
+                    "https://www.vivino.com/search/wines"
+                    f"?q={requests.utils.quote(query)}&language=fr"
+                )
+                try:
+                    driver2.get(search_url)
+                    try:
+                        WebDriverWait(driver2, 8).until(
+                            EC.presence_of_element_located(
+                                (By.CSS_SELECTOR,
+                                 "[class*='averageValue'],[class*='average__number'],[data-average]")
+                            )
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                    vd = parse_vivino_search_html(driver2.page_source, vintage)
+                except Exception:
+                    vd = None
+
+                if vd:
+                    wine.update(vd)
+                    wine["ratio"] = (
+                        round((vd["rating"] / wine["price"]) * 10, 3)
+                        if wine.get("price", 0) > 0 else 0
+                    )
+                    # Mettre en cache
+                    vivino_cache[query] = {**vd, "cached_at": now}
+                    found += 1
+                    if log: log(f"  ✅ {wine['name'][:38]} → ★{vd['rating']} ({vd['ratings_count']} avis)")
+                else:
+                    wine.update(EMPTY)
+                    # Mettre quand même en cache (vide) pour éviter de re-scraper
+                    vivino_cache[query] = {"rating": None, "ratings_count": 0,
+                                           "vivino_url": "", "vivino_year": None,
+                                           "vintage_match": None, "cached_at": now}
+
+                if (i + 1) % 10 == 0 or i == len(vivino_todo) - 1:
+                    if log: log(f"  🍷 {i+1}/{len(vivino_todo)} — {found} notes")
+                time.sleep(0.5)
+
+        finally:
+            try: driver2.quit()
+            except: pass
+
+        save_vivino_cache(vivino_cache)
+        if log: log(f"💾 Cache Vivino sauvegardé")
+    else:
+        if log: log(f"✅ Notes Vivino depuis le cache (0 scraping)")
 
     return all_wines
 
@@ -454,46 +661,82 @@ def build_stars(r: float) -> str:
 
 
 def wine_card_html(wine: dict, rank: int, max_ratio: float) -> str:
-    card_cls  = {1:"top1", 2:"top2", 3:"top3"}.get(rank, "")
-    # Ajouter indicateur millésime non confirmé
+    card_cls    = {1:"top1", 2:"top2", 3:"top3"}.get(rank, "")
     vintage_warn = wine.get("vintage_match") is False
     if vintage_warn:
         card_cls = (card_cls + " vintage-warn").strip()
+    if not wine.get("available", True):
+        card_cls = (card_cls + " unavailable").strip()
 
     rank_icon = {1:"🥇", 2:"🥈", 3:"🥉"}.get(rank, f"#{rank}")
 
+    # ── Nom avec lien Leclerc ───────────────────────────────────────────────
     name_html = (
-        f'<a href="{wine["url"]}" target="_blank" style="color:#1A0810;text-decoration:none">'
-        f'{wine["name"]}</a>' if wine.get("url") else wine["name"]
+        f'<a href="{wine["url"]}" target="_blank" '
+        f'style="color:#1A0810;text-decoration:none;font-weight:500">'
+        f'{wine["name"]}</a>'
+        if wine.get("url") else wine["name"]
+    )
+    vintage_tag = (
+        f' <span style="color:#8B6B72;font-size:.72rem">{wine["vintage"]}</span>'
+        if wine.get("vintage") else ""
     )
 
-    # Sous-titre : Vivino name + alerte millésime
-    subs = []
+    # ── Alerte millésime ────────────────────────────────────────────────────
+    subs = ""
     if wine.get("vivino_year") and wine.get("vintage") and wine["vivino_year"] != wine["vintage"]:
-        subs.append(
-            f'<span class="badge badge-year">⚠️ Vivino trouve {wine["vivino_year"]} '
-            f'(vous avez {wine["vintage"]})</span>'
+        subs = (
+            f'<div style="font-size:.7rem;color:#c17a00;margin-top:.2rem">'
+            f'⚠️ Vivino : millésime {wine["vivino_year"]} (Leclerc : {wine["vintage"]})</div>'
         )
-    elif wine.get("vivino_url"):
-        pass  # pas d'alerte, millésime OK ou inconnu
 
-    vivino_sub = "".join(subs)
+    # ── Indisponible ────────────────────────────────────────────────────────
+    avail_tag = ""
+    if not wine.get("available", True):
+        avail_tag = '<span style="font-size:.68rem;color:#b0003a;margin-left:.4rem">⛔ indispo à Blagnac</span>'
 
+    # ── Liens Leclerc + Vivino côte à côte ─────────────────────────────────
+    links = []
+    if wine.get("url"):
+        links.append(
+            f'<a href="{wine["url"]}" target="_blank" '
+            f'style="font-size:.68rem;color:#2563eb;text-decoration:none;'
+            f'border:1px solid #2563eb;border-radius:3px;padding:1px 5px">🛒 Leclerc</a>'
+        )
+    if wine.get("vivino_url"):
+        links.append(
+            f'<a href="{wine["vivino_url"]}" target="_blank" '
+            f'style="font-size:.68rem;color:#7B2D8B;text-decoration:none;'
+            f'border:1px solid #7B2D8B;border-radius:3px;padding:1px 5px">🍷 Vivino</a>'
+        )
+    links_html = (
+        f'<div style="display:flex;gap:.4rem;margin-top:.35rem;flex-wrap:wrap">'
+        + "".join(links) + "</div>"
+    ) if links else ""
+
+    # ── Badges ──────────────────────────────────────────────────────────────
+    badges = ""
+    ratio = wine.get("ratio") or 0
     rating = wine.get("rating")
+    if ratio > 0 and rank <= 5:  badges += '<span class="badge badge-deal">🔥 Top ratio</span> '
+    if rating and rating >= 4.2: badges += '<span class="badge badge-top">★ Top noté</span>'
+
+    # ── Note Vivino ─────────────────────────────────────────────────────────
     if rating:
-        cnt = f"{wine.get('ratings_count', 0):,}".replace(",", "\u202f")
+        cnt = wine.get("ratings_count") or 0
+        cnt_str = f"{cnt:,}".replace(",", "\u202f") if cnt else "—"
         rating_html = (
             f'<div class="wine-rating">'
             f'<div class="stars">{build_stars(rating)}</div>'
             f'<div class="rating-num">{rating:.1f} / 5</div>'
-            f'<div class="reviews">{cnt} avis</div>'
+            f'<div class="reviews">{cnt_str} avis</div>'
             f'</div>'
         )
     else:
-        rating_html = '<div class="wine-rating no-rating">non trouvé sur Vivino</div>'
+        rating_html = '<div class="wine-rating no-rating">non trouvé<br>sur Vivino</div>'
 
-    ratio = wine.get("ratio") or 0
-    pct   = min(100, (ratio / max_ratio) * 100) if max_ratio > 0 else 0
+    # ── Ratio ────────────────────────────────────────────────────────────────
+    pct = min(100, (ratio / max_ratio) * 100) if max_ratio > 0 else 0
     ratio_html = (
         f'<div class="ratio-wrap">'
         f'<div class="ratio-num-text">{ratio:.3f}</div>'
@@ -503,31 +746,23 @@ def wine_card_html(wine: dict, rank: int, max_ratio: float) -> str:
         if ratio else '<div class="no-rating">—</div>'
     )
 
-    badges = ""
-    if ratio > 0 and rank <= 5:  badges += '<span class="badge badge-deal">🔥 Top ratio</span>'
-    if rating and rating >= 4.2: badges += '<span class="badge badge-top">★ Top noté</span>'
-    if wine.get("vivino_url"):
-        badges += (
-            f'<a href="{wine["vivino_url"]}" target="_blank" '
-            f'style="font-size:.68rem;color:#8B6B72;text-decoration:none;margin-left:.3rem">→ Vivino</a>'
-        )
-
     price_fmt = f'{wine["price"]:.2f}'.replace(".", ",") + " €"
-    vintage_tag = f' <span style="color:#8B6B72;font-size:.72rem">{wine["vintage"]}</span>' if wine.get("vintage") else ""
 
     return (
         f'<div class="wine-card {card_cls}">'
         f'<div class="wine-rank">{rank_icon}</div>'
         f'<div class="wine-info">'
-        f'<div class="wine-name-text">{name_html}{vintage_tag}</div>'
-        f'{vivino_sub}'
-        f'<div style="margin-top:.3rem">{badges}</div>'
+        f'<div class="wine-name-text">{name_html}{vintage_tag}{avail_tag}</div>'
+        f'{subs}'
+        f'{links_html}'
+        f'<div style="margin-top:.25rem">{badges}</div>'
         f'</div>'
         f'{rating_html}'
         f'<div class="wine-price">{price_fmt}</div>'
         f'{ratio_html}'
         f'</div>'
     )
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -563,11 +798,23 @@ with st.sidebar:
         format_func=lambda x: "Toutes" if x == 0 else f"≥ {x} ★",
     )
     only_vintage_ok = st.checkbox("✅ Millésime confirmé uniquement", value=False)
+    only_available  = st.checkbox("🏪 Disponibles à Blagnac uniquement", value=True)
     sort_by = st.selectbox("↕ Trier par", [
         "Meilleur ratio ★/€", "Meilleure note", "Prix croissant", "Prix décroissant",
     ])
     st.divider()
-    scrape_btn = st.button("🔄 Lancer / Rafraîchir", use_container_width=True, type="primary")
+
+    # ── Statut cache ──────────────────────────────────────────────────────────
+    lec_cache = load_leclerc_cache(WINE_TYPES.get(wine_type_label, ""))
+    viv_cache = load_vivino_cache()
+    if lec_cache:
+        st.caption(f"📦 Leclerc : {fmt_cache_age(lec_cache['cached_at'])}")
+    else:
+        st.caption("📦 Leclerc : pas de cache")
+    st.caption(f"🍷 Vivino : {len(viv_cache)} vins en cache")
+
+    scrape_btn    = st.button("🔄 Charger / Vérifier stock", use_container_width=True, type="primary")
+    refresh_vivino = st.button("🍷 Rafraîchir notes Vivino", use_container_width=True)
     st.caption(f"📍 Leclerc Blagnac · magasin {STORE_CODE}")
 
 # ── Session state ──────────────────────────────────────────────────────────────
@@ -580,7 +827,7 @@ if "loaded_type" not in st.session_state:
 if wine_type_slug != st.session_state.loaded_type:
     st.session_state.wines = []
 
-if scrape_btn or not st.session_state.wines:
+if scrape_btn or refresh_vivino or not st.session_state.wines:
     st.session_state.wines = []
 
     with st.status(f"🔍 Chargement {wine_type_label}…", expanded=True) as status:
@@ -588,11 +835,15 @@ if scrape_btn or not st.session_state.wines:
         logs    = []
         def log(msg):
             logs.append(msg)
-            log_box.markdown("\n\n".join(logs[-6:]))
+            log_box.markdown("\n\n".join(logs[-8:]))
 
-        # 1. Scraping Leclerc
         try:
-            raw_wines = scrape_and_enrich(wine_type_slug, log=log)
+            raw_wines = scrape_and_enrich(
+                wine_type_slug,
+                force_leclerc = scrape_btn,           # forcer re-scrape Leclerc
+                force_vivino  = refresh_vivino,        # forcer re-scrape Vivino
+                log=log,
+            )
         except Exception as e:
             st.error(
                 f"❌ Erreur Selenium : {e}\n\n"
@@ -604,22 +855,19 @@ if scrape_btn or not st.session_state.wines:
             st.error("Aucun produit récupéré — réessayez dans quelques instants.")
             st.stop()
 
-        log(f"✅ {len(raw_wines)} vins trouvés")
+        n_rated    = sum(1 for w in raw_wines if w.get("rating"))
+        n_dispo    = sum(1 for w in raw_wines if w.get("available", True))
+        n_indispo  = len(raw_wines) - n_dispo
 
-        n_rated = sum(1 for w in raw_wines if w.get("rating"))
-        n_vintage_ok  = sum(1 for w in raw_wines if w.get("vintage_match") is True)
-        n_vintage_bad = sum(1 for w in raw_wines if w.get("vintage_match") is False)
-
-        log(f"✅ {n_rated}/{len(raw_wines)} notes Vivino")
-        if n_vintage_bad:
-            log(f"⚠️ {n_vintage_bad} millésimes non confirmés")
+        log(f"✅ {n_dispo} vins dispo, {n_indispo} indisponible(s), {n_rated} notes Vivino")
 
         st.session_state.wines       = raw_wines
         st.session_state.loaded_type = wine_type_slug
         status.update(
-            label=f"✅ {len(raw_wines)} vins analysés — {n_rated} notes Vivino",
+            label=f"✅ {n_dispo} vins en rayon · {n_rated} notes Vivino",
             state="complete",
         )
+
 
 
 # ── Affichage ──────────────────────────────────────────────────────────────────
@@ -630,9 +878,9 @@ if wines:
         w for w in wines
         if w["price"] <= price_max
         and (rating_min == 0 or (w.get("rating") and w["rating"] >= rating_min))
-        and (not search
-             or search.lower() in w["name"].lower())
+        and (not search or search.lower() in w["name"].lower())
         and (not only_vintage_ok or w.get("vintage_match") is True)
+        and (not only_available or w.get("available", True))
     ]
 
     sort_key = {
