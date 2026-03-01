@@ -193,148 +193,135 @@ def build_vivino_query(wine_name: str) -> str:
     return " ".join(p for p in parts if p)
 
 
-def parse_vivino_snippet(url: str, snippet: str, wine_vintage: int | None) -> dict | None:
+def parse_vivino_rendered_html(html: str) -> tuple[float, int] | None:
     """
-    Extrait note, nb avis et vérifie le millésime depuis un snippet Google/DDG.
-    Pattern note  : "4.2" ou "4.2/5" ou "4,2"
-    Pattern avis  : "1 234 ratings" / "1234 avis" / "1,234 ratings"
+    Extrait (note, nb_avis) depuis le HTML rendu d'une page Vivino.
+    Couvre : JSON-LD, data-attributes, classes CSS hashées, texte brut.
     """
-    if "vivino.com" not in url:
-        return None
-
-    # Note
-    rating_m = re.search(r"\b([2-4][.,]\d)\s*(?:/\s*5)?\b", snippet)
-    if not rating_m:
-        return None
-    try:
-        rating = float(rating_m.group(1).replace(",", "."))
-    except ValueError:
-        return None
-    if not (2.5 <= rating <= 5.0):
-        return None
-
-    # Nombre d'avis
-    reviews_m = re.search(r"([\d\s,\.]+)\s*(?:ratings?|avis|notes?)\b", snippet, re.I)
-    reviews = 0
-    if reviews_m:
+    # 1. JSON-LD aggregateRating
+    m = re.search(r'"ratingValue"\s*:\s*"?([\d.,]+)"?', html)
+    if m:
         try:
-            reviews = int(re.sub(r"[\s,\.]", "", reviews_m.group(1)))
+            r = round(float(m.group(1).replace(",", ".")), 1)
+            c_m = re.search(r'"(?:review|rating)Count"\s*:\s*"?(\d+)"?', html)
+            if 2.5 <= r <= 5.0:
+                return (r, int(c_m.group(1)) if c_m else 0)
         except ValueError:
             pass
 
-    # Millésime dans le snippet
-    vintage_in_snippet = None
-    vm = re.search(r"\b(19[5-9]\d|20[0-3]\d)\b", snippet)
-    if vm:
-        vintage_in_snippet = int(vm.group(1))
+    # 2. data-average attribute
+    m = re.search(r'data-average="([\d.,]+)"', html)
+    if m:
+        try:
+            r = round(float(m.group(1).replace(",", ".")), 1)
+            c_m = re.search(r'data-ratings-count="(\d+)"', html)
+            if 2.5 <= r <= 5.0:
+                return (r, int(c_m.group(1)) if c_m else 0)
+        except ValueError:
+            pass
 
-    # Vérification millésime : est-ce que le vin trouvé correspond bien ?
-    vintage_match = None
-    if wine_vintage and vintage_in_snippet:
-        vintage_match = (wine_vintage == vintage_in_snippet)
-    elif wine_vintage and not vintage_in_snippet:
-        vintage_match = None  # on ne sait pas
-    else:
-        vintage_match = True  # pas d'année dans le nom Leclerc → pas de vérif
+    # 3. Classes CSS hashées Vivino (vivinoRating_averageValue__xxxx)
+    m = re.search(r'vivinoRating_averageValue[^>]*>([\d.,]+)<', html)
+    if m:
+        try:
+            r = round(float(m.group(1).strip().replace(",", ".")), 1)
+            c_m = re.search(r'vivinoRating_numRatings[^>]*>([\d\s\xa0]+)', html)
+            count = int(re.sub(r"[^\d]", "", c_m.group(1)) or 0) if c_m else 0
+            if 2.5 <= r <= 5.0:
+                return (r, count)
+        except ValueError:
+            pass
 
-    return {
-        "rating":          round(rating, 1),
-        "ratings_count":   reviews,
-        "vivino_url":      url,
-        "vintage_match":   vintage_match,    # True / False / None
-        "vivino_year":     vintage_in_snippet,
-    }
+    # 4. "3,9 / 5" ou "3.9/5" dans le texte
+    m = re.search(r"(\d[.,]\d)\s*/\s*5", html)
+    if m:
+        try:
+            r = round(float(m.group(1).replace(",", ".")), 1)
+            c_m = re.search(r"(\d[\d\s\xa0]+)\s*(?:avis|notes?|ratings?)", html, re.I)
+            count = int(re.sub(r"[^\d]", "", c_m.group(1))) if c_m else 0
+            if 2.5 <= r <= 5.0:
+                return (r, count)
+        except ValueError:
+            pass
+
+    return None
 
 
-def search_vivino_with_session(
-    session: "requests.Session",
-    wine_name: str,
-    wine_vintage: int | None,
-) -> dict | None:
+def search_vivino_selenium(driver, wine_name: str, wine_vintage: int | None) -> dict | None:
     """
-    Interroge l'API Vivino via une session Python dotée de vrais cookies navigateur.
-    Pas de CORS côté Python → aucun blocage.
-    Essaie /api/explore/explore puis /api/wines/search en fallback.
+    Cherche un vin sur Vivino via Selenium (vrai navigateur = pas de blocage).
+    Charge la page de recherche Vivino et parse le HTML rendu.
     """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
     query = build_vivino_query(wine_name)
     if not query:
         return None
 
-    def _parse(records: list) -> dict | None:
-        if not records:
+    search_url = (
+        "https://www.vivino.com/search/wines"
+        f"?q={requests.utils.quote(query)}&language=fr"
+    )
+
+    try:
+        driver.get(search_url)
+        try:
+            WebDriverWait(driver, 8).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR,
+                    "[class*='wineName'], [class*='wine-card'], "
+                    "[class*='averageValue'], .average__number"
+                ))
+            )
+        except Exception:
+            pass
+        time.sleep(1.5)
+
+        html = driver.page_source
+        result = parse_vivino_rendered_html(html)
+        if not result:
             return None
-        best    = records[0]
-        vintage = best.get("vintage", {})
-        wine    = vintage.get("wine", {})
-        stats   = vintage.get("statistics") or wine.get("statistics") or {}
-        rating  = float(stats.get("ratings_average") or 0)
-        count   = int(stats.get("ratings_count") or 0)
-        if not (2.5 <= rating <= 5.0):
-            return None
-        # Vérification millésime
-        vivino_year = vintage.get("year")
+
+        rating, count = result
+
+        # URL du premier résultat vin
+        soup = BeautifulSoup(html, "html.parser")
+        best_url = ""
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if re.search(r"/wines/[\w-]+", href) and "search" not in href:
+                best_url = href if href.startswith("http") else f"https://www.vivino.com{href}"
+                break
+
+        # Millésime Vivino (depuis l'URL ou le texte de page)
+        vivino_year = None
+        if best_url:
+            ym = re.search(r"-(20[0-3]\d|19[5-9]\d)(?:-|$)", best_url)
+            if ym:
+                vivino_year = int(ym.group(1))
+        if not vivino_year:
+            ym2 = re.search(r"\b(20[0-3]\d|19[5-9]\d)\b", html[:3000])
+            if ym2:
+                vivino_year = int(ym2.group(1))
+
+        vintage_match = None
         if wine_vintage and vivino_year:
-            vintage_match = (int(wine_vintage) == int(vivino_year))
-        else:
-            vintage_match = None
-        seo = wine.get("seo_name", "")
+            vintage_match = (wine_vintage == vivino_year)
+        elif not wine_vintage:
+            vintage_match = True
+
         return {
-            "rating":          round(rating, 1),
+            "rating":          rating,
             "ratings_count":   count,
-            "vivino_url":      f"https://www.vivino.com{seo}" if seo else "",
+            "vivino_url":      best_url,
             "vivino_year":     vivino_year,
             "vintage_match":   vintage_match,
         }
 
-    headers = {
-        "Accept":           "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language":  "fr-FR,fr;q=0.9",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer":          "https://www.vivino.com/explore",
-    }
-
-    # Tentative 1 : explore/explore
-    try:
-        r = session.get(
-            "https://www.vivino.com/api/explore/explore",
-            params={"language": "fr", "wine_type_ids[]": 1,
-                    "q": query, "order_by": "match", "per_page": 3},
-            headers=headers, timeout=10,
-        )
-        if r.status_code == 200:
-            result = _parse(r.json().get("explore_vintage", {}).get("records", []))
-            if result:
-                return result
     except Exception:
-        pass
+        return None
 
-    # Tentative 2 : wines/search
-    try:
-        r2 = session.get(
-            "https://www.vivino.com/api/wines/search",
-            params={"q": query, "language": "fr", "per_page": 3},
-            headers=headers, timeout=10,
-        )
-        if r2.status_code == 200:
-            wines_list = r2.json().get("wines", [])
-            if wines_list:
-                w    = wines_list[0]
-                st   = w.get("statistics", {})
-                rat  = float(st.get("ratings_average") or 0)
-                cnt  = int(st.get("ratings_count") or 0)
-                if 2.5 <= rat <= 5.0:
-                    seo = w.get("seo_name", "")
-                    return {
-                        "rating":        round(rat, 1),
-                        "ratings_count": cnt,
-                        "vivino_url":    f"https://www.vivino.com{seo}" if seo else "",
-                        "vivino_year":   None,
-                        "vintage_match": None,
-                    }
-    except Exception:
-        pass
-
-    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -378,10 +365,10 @@ def get_selenium_driver():
 
 def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
     """
-    1. Scrape Leclerc (Selenium)
-    2. Visite vivino.com pour récupérer les cookies de session
-    3. Transfert des cookies dans requests.Session (Python — pas de CORS)
-    4. Enrichissement Vivino via l'API avec ces cookies
+    Garde le driver Selenium ouvert pour :
+    1. Scraper Leclerc (toutes les pages)
+    2. Enrichir chaque vin avec les notes Vivino (pages de recherche Vivino)
+    Tout dans le même navigateur — aucun blocage possible.
     """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
@@ -433,51 +420,31 @@ def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
             all_wines.extend(new)
             if log: log(f"✅ Page {p} : {len(new)} vins (total {len(all_wines)})")
 
-        # ── Étape 2 : Cookies Vivino via le navigateur ───────────────────────
-        if log: log("🍷 Initialisation session Vivino…")
-        driver.get("https://www.vivino.com/explore?language=fr")
-        time.sleep(3)  # laisser Vivino définir ses cookies
-
-        # Transfert cookies Selenium → requests.Session
-        vivino_session = requests.Session()
-        vivino_session.headers.update({
-            "User-Agent": driver.execute_script("return navigator.userAgent"),
-            "Accept-Language": "fr-FR,fr;q=0.9",
-        })
-        for cookie in driver.get_cookies():
-            vivino_session.cookies.set(
-                cookie["name"], cookie["value"],
-                domain=cookie.get("domain", ".vivino.com"),
-            )
-        if log: log(f"  ✅ {len(driver.get_cookies())} cookies transférés")
+        # ── Étape 2 : Vivino (même driver) ──────────────────────────────────
+        if log: log(f"🍷 Recherche notes Vivino ({len(all_wines)} vins)…")
+        all_wines = enrich_with_vivino(all_wines, driver, log=log)
 
     finally:
         driver.quit()
 
-    # ── Étape 3 : Enrichissement Vivino (Python, pas de CORS) ────────────────
-    if log: log(f"🍷 Recherche notes Vivino ({len(all_wines)} vins)…")
-    all_wines = enrich_with_vivino(all_wines, vivino_session, log=log)
-
     return all_wines
 
 
-def enrich_with_vivino(
-    wines: list[dict],
-    session: "requests.Session",
-    log=None,
-) -> list[dict]:
+def enrich_with_vivino(wines: list[dict], driver, log=None) -> list[dict]:
     """
-    Enrichit les vins avec Vivino via la session Python (cookies navigateur).
-    Séquentiel avec pause — évite le rate-limit Vivino.
+    Enrichit les vins avec Vivino via le driver Selenium existant.
+    Charge chaque page de recherche Vivino — vrai navigateur, aucun blocage.
     """
     total = len(wines)
     found = 0
-    EMPTY = {"rating": None, "ratings_count": 0, "ratio": 0,
-             "vivino_url": "", "vivino_year": None, "vintage_match": None}
+    EMPTY = {
+        "rating": None, "ratings_count": 0, "ratio": 0,
+        "vivino_url": "", "vivino_year": None, "vintage_match": None,
+    }
 
     for i, wine in enumerate(wines):
-        vd = search_vivino_with_session(session, wine["name"], wine.get("vintage"))
-        if vd:
+        vd = search_vivino_selenium(driver, wine["name"], wine.get("vintage"))
+        if vd and vd.get("rating"):
             wine.update(vd)
             wine["ratio"] = (
                 round((vd["rating"] / wine["price"]) * 10, 3)
@@ -487,12 +454,15 @@ def enrich_with_vivino(
         else:
             wine.update(EMPTY)
 
-        if (i + 1) % 10 == 0 or i == total - 1:
-            if log: log(f"  🍷 {i+1}/{total} — {found} notes trouvées")
+        if (i + 1) % 5 == 0 or i == total - 1:
+            if log:
+                log(f"  🍷 {i+1}/{total} — {found} notes trouvées")
 
-        time.sleep(0.4)  # respecter Vivino
+        time.sleep(0.5)
 
     return wines
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
