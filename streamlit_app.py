@@ -176,21 +176,19 @@ def get_nb_pages(html: str) -> int:
 
 def build_vivino_query(wine_name: str) -> str:
     """
-    Construit la query web : "{nom propre} {appellation} vivino rating"
-    Ex: "E.Guigal Côtes du Rhône vivino rating"
-    Coupe sur la première virgule OU le premier " - " pour isoler le nom.
+    Query pour l'API Vivino : "{nom} {appellation}" — sans "vivino rating".
+    Ex: "Mouton Cadet Bordeaux", "E.Guigal Côtes du Rhône"
     """
-    # Nom propre : avant la 1ère virgule OU avant le 1er " - "
     nom = re.split(r",\s*|\s+-\s+", wine_name)[0].strip()
-    nom = re.sub(r"(19|20)\d{2}", "", nom).strip()
+    nom = re.sub(r"\b(19|20)\d{2}\b", "", nom).strip().strip("-").strip()
 
-    # Appellation entre le 1er " - " et AOP/IGP/AOC/Vin de France
     app_m = re.search(r"-\s*([\w\s\-]+?)\s*(?:AOP|IGP|AOC|Vin de France)", wine_name, re.I)
     appellation = app_m.group(1).strip() if app_m else ""
 
-    parts = [p for p in [nom, appellation] if p and p.lower() not in nom.lower() or p == nom]
-    parts.append("vivino rating")
-    return " ".join(p for p in parts if p)
+    parts = [nom]
+    if appellation and appellation.lower() not in nom.lower():
+        parts.append(appellation)
+    return " ".join(parts)
 
 
 def parse_explore_response(data: dict, wine_vintage: int | None) -> dict | None:
@@ -225,8 +223,8 @@ def parse_explore_response(data: dict, wine_vintage: int | None) -> dict | None:
 # ─────────────────────────────────────────────────────────────────────────────
 # SELENIUM — Leclerc + Vivino dans le même navigateur
 # Approche du repo aptash/vivino-api :
-#   naviguer sur vivino.com, lire le csrf-token, appeler l'API via fetch()
-#   depuis le contexte de la page (même origine → pas de CORS)
+#   driver.get(apiUrl) → body.text = JSON brut → json.loads()
+#   Vrai navigateur = pas de blocage IP, pas de CORS, pas de CSRF
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_selenium_driver():
@@ -265,39 +263,27 @@ def get_selenium_driver():
 
 def search_vivino_from_page(driver, query: str, wine_vintage: int | None) -> dict | None:
     """
-    Appelle l'API Vivino via fetch() depuis le contexte du navigateur déjà sur vivino.com.
-    Même approche que aptash/vivino-api (Puppeteer → page.evaluate + fetch + csrf-token).
+    Appelle l'API Vivino en naviguant DIRECTEMENT sur l'URL API avec Selenium.
+    Même approche que aptash/vivino-api en Puppeteer :
+      page.goto(apiUrl) → page.content() → JSON.parse()
+    Le navigateur reçoit le JSON brut — pas de fetch, pas de CORS, pas de CSRF.
     """
     import json as _json
     import urllib.parse
 
-    encoded = urllib.parse.quote(query)
     url = (
-        f"https://www.vivino.com/api/explore/explore"
-        f"?language=fr&wine_type_ids[]=1&q={encoded}&order_by=match&per_page=3"
+        "https://www.vivino.com/api/explore/explore"
+        f"?language=fr&q={urllib.parse.quote(query)}&order_by=match&per_page=5"
     )
 
-    js = """
-    const [url, resolve] = arguments;
-    const csrf = document.querySelector('[name="csrf-token"]')?.content || '';
-    fetch(url, {
-        headers: {
-            'content-type': 'application/json',
-            'x-csrf-token': csrf,
-            'accept': 'application/json',
-        }
-    })
-    .then(r => r.json())
-    .then(d => resolve(JSON.stringify(d)))
-    .catch(e => resolve(JSON.stringify({error: e.toString()})));
-    """
-
     try:
-        result = driver.execute_async_script(js, url)
-        if not result:
+        driver.get(url)
+        # La page affiche le JSON brut dans un <body> ou <pre>
+        body = driver.find_element("tag name", "body").text.strip()
+        if not body or body.startswith("<"):
             return None
-        data = _json.loads(result)
-        if "error" in data:
+        data = _json.loads(body)
+        if "explore_vintage" not in data:
             return None
         return parse_explore_response(data, wine_vintage)
     except Exception:
@@ -359,23 +345,8 @@ def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
             all_wines.extend(new)
             if log: log(f"✅ Page {p} : {len(new)} vins (total {len(all_wines)})")
 
-        # ── Étape 2 : Naviguer sur vivino.com pour le CSRF token ─────────────
-        if log: log("🍷 Connexion à Vivino…")
-        driver.get("https://www.vivino.com/explore?language=fr")
-        try:
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, '[name="csrf-token"]')),
-            )
-        except Exception:
-            pass
-        time.sleep(2)
-
-        csrf = driver.execute_script(
-            "return document.querySelector('[name=\"csrf-token\"]')?.content || ''"
-        )
-        if log: log(f"  ✅ CSRF token: {'présent' if csrf else 'absent (continue quand même)'}")
-
-        # ── Étape 3 : Enrichissement Vivino ─────────────────────────────────
+        # ── Étape 2 : Enrichissement Vivino (navigation directe sur l'URL API) ──
+        if log: log(f"🍷 Recherche Vivino ({len(all_wines)} vins)…")
         total = len(all_wines)
         found = 0
         EMPTY = {"rating": None, "ratings_count": 0, "ratio": 0,
@@ -397,6 +368,7 @@ def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
             if (i + 1) % 5 == 0 or i == total - 1:
                 if log: log(f"  🍷 {i+1}/{total} — {found} notes trouvées")
             time.sleep(0.3)
+
 
     finally:
         driver.quit()
