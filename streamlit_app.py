@@ -261,12 +261,10 @@ def get_selenium_driver():
     return webdriver.Chrome(options=opts)
 
 
-def search_vivino_from_page(driver, query: str, wine_vintage: int | None) -> dict | None:
+def search_vivino(session: "requests.Session", query: str, wine_vintage: int | None) -> dict | None:
     """
-    Appelle l'API Vivino en naviguant DIRECTEMENT sur l'URL API avec Selenium.
-    Même approche que aptash/vivino-api en Puppeteer :
-      page.goto(apiUrl) → page.content() → JSON.parse()
-    Le navigateur reçoit le JSON brut — pas de fetch, pas de CORS, pas de CSRF.
+    Appelle l'API Vivino via requests.Session chargée des vrais cookies navigateur.
+    Simple, rapide, sans changer de page.
     """
     import json as _json
     import urllib.parse
@@ -275,14 +273,17 @@ def search_vivino_from_page(driver, query: str, wine_vintage: int | None) -> dic
         "https://www.vivino.com/api/explore/explore"
         f"?language=fr&q={urllib.parse.quote(query)}&order_by=match&per_page=5"
     )
-
+    headers = {
+        "Accept":           "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language":  "fr-FR,fr;q=0.9",
+        "Referer":          "https://www.vivino.com/explore",
+        "X-Requested-With": "XMLHttpRequest",
+    }
     try:
-        driver.get(url)
-        # La page affiche le JSON brut dans un <body> ou <pre>
-        body = driver.find_element("tag name", "body").text.strip()
-        if not body or body.startswith("<"):
+        r = session.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
             return None
-        data = _json.loads(body)
+        data = r.json()
         if "explore_vintage" not in data:
             return None
         return parse_explore_response(data, wine_vintage)
@@ -293,8 +294,9 @@ def search_vivino_from_page(driver, query: str, wine_vintage: int | None) -> dic
 def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
     """
     1. Scrape Leclerc (Selenium)
-    2. Navigue sur vivino.com pour obtenir le CSRF token
-    3. Pour chaque vin : appelle l'API Vivino via fetch() depuis la page vivino.com
+    2. Visite https://www.vivino.com avec le même navigateur → cookies de session réels
+    3. Transfère les cookies dans requests.Session
+    4. Appelle l'API Vivino pour chaque vin via requests (rapide, pas de changement de page)
     """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
@@ -345,33 +347,47 @@ def scrape_and_enrich(wine_type_slug: str, log=None) -> list[dict]:
             all_wines.extend(new)
             if log: log(f"✅ Page {p} : {len(new)} vins (total {len(all_wines)})")
 
-        # ── Étape 2 : Enrichissement Vivino (navigation directe sur l'URL API) ──
-        if log: log(f"🍷 Recherche Vivino ({len(all_wines)} vins)…")
-        total = len(all_wines)
-        found = 0
-        EMPTY = {"rating": None, "ratings_count": 0, "ratio": 0,
-                 "vivino_url": "", "vivino_year": None, "vintage_match": None}
+        # ── Étape 2 : Initialiser la session Vivino ──────────────────────────
+        if log: log("🍷 Initialisation session Vivino…")
+        driver.get("https://www.vivino.com")
+        time.sleep(3)
 
-        for i, wine in enumerate(all_wines):
-            query = build_vivino_query(wine["name"])
-            vd    = search_vivino_from_page(driver, query, wine.get("vintage"))
-            if vd:
-                wine.update(vd)
-                wine["ratio"] = (
-                    round((vd["rating"] / wine["price"]) * 10, 3)
-                    if wine["price"] > 0 else 0
-                )
-                found += 1
-            else:
-                wine.update(EMPTY)
+        # Transférer cookies + User-Agent vers requests.Session
+        vivino_session = requests.Session()
+        vivino_session.headers.update({
+            "User-Agent": driver.execute_script("return navigator.userAgent"),
+        })
+        for c in driver.get_cookies():
+            vivino_session.cookies.set(c["name"], c["value"])
 
-            if (i + 1) % 5 == 0 or i == total - 1:
-                if log: log(f"  🍷 {i+1}/{total} — {found} notes trouvées")
-            time.sleep(0.3)
-
+        if log: log(f"  ✅ {len(driver.get_cookies())} cookies transférés")
 
     finally:
         driver.quit()
+
+    # ── Étape 3 : Enrichissement Vivino via requests (driver fermé) ──────────
+    if log: log(f"🍷 Recherche Vivino ({len(all_wines)} vins)…")
+    total = len(all_wines)
+    found = 0
+    EMPTY = {"rating": None, "ratings_count": 0, "ratio": 0,
+             "vivino_url": "", "vivino_year": None, "vintage_match": None}
+
+    for i, wine in enumerate(all_wines):
+        query = build_vivino_query(wine["name"])
+        vd    = search_vivino(vivino_session, query, wine.get("vintage"))
+        if vd:
+            wine.update(vd)
+            wine["ratio"] = (
+                round((vd["rating"] / wine["price"]) * 10, 3)
+                if wine["price"] > 0 else 0
+            )
+            found += 1
+        else:
+            wine.update(EMPTY)
+
+        if (i + 1) % 10 == 0 or i == total - 1:
+            if log: log(f"  🍷 {i+1}/{total} — {found} notes trouvées")
+        time.sleep(0.4)
 
     return all_wines
 
