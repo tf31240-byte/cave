@@ -21,30 +21,7 @@ STORE_CODE  = "1431"
 LECLERC_BASE = "https://www.e.leclerc/cat/vins-rouges"
 MAX_PAGES    = 10
 
-HEADERS_VIVINO = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "X-Requested-With": "XMLHttpRequest",
-    "Referer": "https://www.vivino.com/explore",
-    "Origin": "https://www.vivino.com",
-    "Connection": "keep-alive",
-}
-
-# Session persistante — Vivino exige des cookies de session valides
-# On l'initialise une fois au démarrage
-@st.cache_resource(show_spinner=False)
-def get_vivino_session() -> requests.Session:
-    """Crée une session Vivino avec cookies valides."""
-    session = requests.Session()
-    session.headers.update(HEADERS_VIVINO)
-    try:
-        # Premier appel pour récupérer les cookies de session
-        session.get("https://www.vivino.com/explore", timeout=10)
-    except Exception:
-        pass
-    return session
+# Vivino est interrogé via Selenium (même navigateur) pour éviter le blocage IP
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CSS
@@ -100,36 +77,28 @@ def parse_cards_from_html(html: str) -> list[dict]:
         name  = label.get_text(strip=True) if label else ""
         if not name:
             continue
-        # Prix — 3 méthodes de fallback pour couvrir toutes les structures Leclerc
+        # Prix — block-price-and-availability contient toujours "12€,00" ou "3€,50"
+        # C'est le plus robuste : fonctionne en SSR et CSR (Selenium)
         price = 0.0
-        # Méthode 1 : price-unit + price-cents séparés (cas courant)
-        unit_els  = card.find_all(class_=lambda c: c and "price-unit"  in c.split())
-        cents_els = card.find_all(class_=lambda c: c and "price-cents" in c.split())
-        if unit_els and cents_els:
-            u = unit_els[0].get_text(strip=True)
-            c = cents_els[0].get_text(strip=True).replace(",","").replace(".","").strip()
-            try:
-                price = float(f"{u}.{c}")
-            except ValueError:
-                pass
-        # Méthode 2 : classe .price directement (ex: "3€,50" en un seul élément)
+        blk = card.find(class_=lambda c: c and "block-price-and-availability" in c.split())
+        if blk:
+            m_price = re.search(r"(\d+)€,(\d{2})", blk.get_text(strip=True))
+            if m_price:
+                try:
+                    price = float(f"{m_price.group(1)}.{m_price.group(2)}")
+                except ValueError:
+                    pass
+        # Fallback : price-unit + price-cents séparés
         if price == 0:
-            price_el = card.find(class_=lambda c: c and c.split() == ["price"])
-            if price_el:
-                txt = price_el.get_text(strip=True).replace("€","").replace("\xa0","")
-                txt = re.sub(r",(\d{2})$", r".\1", txt.strip()).replace(",","")
-                m2  = re.search(r"(\d+\.?\d*)", txt)
-                if m2:
-                    try: price = float(m2.group(1))
-                    except ValueError: pass
-        # Méthode 3 : regex sur le bloc prix complet (dernier recours)
-        if price == 0:
-            blk = card.find(class_="block-price-and-availability")
-            if blk:
-                m3 = re.search(r"(\d+)[€,\s](\d{2})", blk.get_text(strip=True))
-                if m3:
-                    try: price = float(f"{m3.group(1)}.{m3.group(2)}")
-                    except ValueError: pass
+            unit_els  = card.find_all(class_=lambda c: c and "price-unit"  in c.split())
+            cents_els = card.find_all(class_=lambda c: c and "price-cents" in c.split())
+            if unit_els and cents_els:
+                u = unit_els[0].get_text(strip=True)
+                c = cents_els[0].get_text(strip=True).lstrip(",").strip()
+                try:
+                    price = float(f"{u}.{c}")
+                except ValueError:
+                    pass
         # URL
         link = card.find("a", href=True)
         href = link["href"] if link else ""
@@ -213,7 +182,76 @@ def get_selenium_driver():
     return webdriver.Chrome(options=opts)
 
 
+def clean_name_for_vivino(wine_name: str) -> str:
+    """Nettoie le nom Leclerc pour la recherche Vivino."""
+    clean = re.sub(r"\s*-\s*(AOP|IGP|AOC|Vin de France|Rouge|Blanc|Rosé|Moelleux).*", "", wine_name, flags=re.I)
+    clean = re.sub(r",?\s*\b(19|20)\d{2}\b", "", clean)
+    clean = re.sub(r"\s*(AOP|IGP|AOC)\b", "", clean, flags=re.I)
+    clean = re.sub(r"[\s,\-]+$", "", clean).strip()
+    return " ".join(clean.split()[:6])
+
+
+def search_vivino_via_selenium(driver, wine_name: str) -> dict | None:
+    """
+    Interroge l'API Vivino via le driver Selenium déjà ouvert.
+    Le navigateur fait la requête fetch() — contourne le blocage IP des datacenters.
+    """
+    query = clean_name_for_vivino(wine_name)
+    if not query:
+        return None
+
+    import json as _json
+    url = (
+        "https://www.vivino.com/api/explore/explore"
+        f"?language=fr&wine_type_ids[]=1&q={requests.utils.quote(query)}"
+        "&order_by=match&per_page=3"
+    )
+    js = """
+    const [url, resolve] = arguments;
+    fetch(url, {
+        headers: {
+            'Accept': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+    })
+    .then(r => r.json())
+    .then(d => resolve(JSON.stringify(d)))
+    .catch(() => resolve(null));
+    """
+    try:
+        result = driver.execute_async_script(js, url)
+        if not result:
+            return None
+        data    = _json.loads(result)
+        records = data.get("explore_vintage", {}).get("records", [])
+        if not records:
+            return None
+        best    = records[0]
+        vintage = best.get("vintage", {})
+        wine    = vintage.get("wine", {})
+        stats   = vintage.get("statistics") or wine.get("statistics") or {}
+        rating  = float(stats.get("ratings_average") or 0)
+        count   = int(stats.get("ratings_count") or 0)
+        if not rating:
+            return None
+        seo = wine.get("seo_name", "")
+        return {
+            "vivino_name":   wine.get("name", ""),
+            "vivino_year":   vintage.get("year", ""),
+            "rating":        round(rating, 2),
+            "ratings_count": count,
+            "vivino_url":    f"https://www.vivino.com{seo}" if seo else "",
+        }
+    except Exception:
+        return None
+
+
 def scrape_with_selenium(log=None) -> list[dict]:
+    """
+    1. Scrape Leclerc Blagnac (toutes les pages)
+    2. Enrichit chaque vin avec les notes Vivino
+    Tout se fait dans le même driver Selenium — pas de blocage IP.
+    """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
@@ -224,21 +262,18 @@ def scrape_with_selenium(log=None) -> list[dict]:
     seen_eans = set()
 
     try:
-        # ── Page 1 ──────────────────────────────────────────────────────────
-        url_p1 = f"{LECLERC_BASE}#oaf-sign-code={STORE_CODE}"
-        if log: log(f"🌐 Chargement page 1…")
-        driver.get(url_p1)
-
-        # Attendre que Angular rende les cartes produit
+        # ── Étape 1 : Leclerc ───────────────────────────────────────────────
+        if log: log("🌐 Chargement page 1 Leclerc…")
+        driver.get(f"{LECLERC_BASE}#oaf-sign-code={STORE_CODE}")
         try:
             WebDriverWait(driver, 25).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card"))
             )
         except Exception:
             pass
-        time.sleep(2)  # laisser le filtre magasin s'appliquer
+        time.sleep(2)
 
-        html    = driver.page_source
+        html     = driver.page_source
         wines_p1 = parse_cards_from_html(html)
         nb_pages = min(get_nb_pages(html), MAX_PAGES)
 
@@ -246,15 +281,11 @@ def scrape_with_selenium(log=None) -> list[dict]:
             if w["ean"] not in seen_eans:
                 seen_eans.add(w["ean"])
                 all_wines.append(w)
+        if log: log(f"✅ Page 1 : {len(wines_p1)} vins — {nb_pages} page(s)")
 
-        if log: log(f"✅ Page 1 : {len(wines_p1)} vins — {nb_pages} page(s) au total")
-
-        # ── Pages suivantes ──────────────────────────────────────────────────
         for p in range(2, nb_pages + 1):
-            # URL directe : plus fiable que cliquer sur le bouton "next" Angular
-            url_p = f"{LECLERC_BASE}?page={p}#oaf-sign-code={STORE_CODE}"
-            if log: log(f"🌐 Chargement page {p}/{nb_pages}…")
-            driver.get(url_p)
+            if log: log(f"🌐 Page {p}/{nb_pages}…")
+            driver.get(f"{LECLERC_BASE}?page={p}#oaf-sign-code={STORE_CODE}")
             try:
                 WebDriverWait(driver, 20).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card"))
@@ -262,128 +293,42 @@ def scrape_with_selenium(log=None) -> list[dict]:
             except Exception:
                 pass
             time.sleep(2)
-
             wines_p = parse_cards_from_html(driver.page_source)
             new = [w for w in wines_p if w["ean"] not in seen_eans]
             if not new:
-                if log: log(f"⚠️ Page {p} vide ou doublons — arrêt")
                 break
             for w in new:
                 seen_eans.add(w["ean"])
             all_wines.extend(new)
-            if log: log(f"✅ Page {p} : {len(new)} nouveaux vins (total {len(all_wines)})")
+            if log: log(f"✅ Page {p} : {len(new)} vins (total {len(all_wines)})")
+
+        # ── Étape 2 : Vivino via le même navigateur ──────────────────────────
+        if log: log(f"🍷 Recherche des notes Vivino ({len(all_wines)} vins)…")
+
+        # Naviguer d'abord sur Vivino pour initialiser les cookies de session
+        driver.get("https://www.vivino.com/explore")
+        time.sleep(2)
+
+        for i, wine in enumerate(all_wines):
+            vd = search_vivino_via_selenium(driver, wine["name"])
+            if vd:
+                wine.update(vd)
+                wine["ratio"] = (
+                    round((vd["rating"] / wine["price"]) * 10, 3)
+                    if wine["price"] > 0 else 0
+                )
+            else:
+                wine.update({"rating": None, "ratings_count": 0,
+                              "ratio": 0, "vivino_name": "", "vivino_url": ""})
+            if log and (i + 1) % 10 == 0:
+                found = sum(1 for w in all_wines[:i+1] if w.get("rating"))
+                log(f"  🍷 {i+1}/{len(all_wines)} — {found} notes trouvées")
+            time.sleep(0.3)  # respecter Vivino
 
     finally:
         driver.quit()
 
     return all_wines
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# VIVINO  (nettoyage testé sur tous les formats Leclerc)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def clean_name_for_vivino(wine_name: str) -> str:
-    """
-    Nettoie le nom Leclerc pour la recherche Vivino.
-    Ex: "Gérard Bertrand Heresie, 2022 - Corbières AOP - Rouge - 75 cl"
-     → "Gérard Bertrand Heresie - Corbières"
-    """
-    clean = wine_name
-    # 1. Supprimer tout à partir de "- AOP/IGP/AOC/Vin de France/Rouge/Blanc/Rosé"
-    clean = re.sub(
-        r"\s*-\s*(AOP|IGP|AOC|Vin de France|Rouge|Blanc|Rosé|Moelleux).*",
-        "", clean, flags=re.I
-    )
-    # 2. Supprimer l'année (avec ou sans virgule)
-    clean = re.sub(r",?\s*\b(19|20)\d{2}\b", "", clean)
-    # 3. Supprimer les mentions AOP/IGP/AOC résiduelles
-    clean = re.sub(r"\s*(AOP|IGP|AOC)\b", "", clean, flags=re.I)
-    # 4. Nettoyer ponctuation finale
-    clean = re.sub(r"[\s,\-]+$", "", clean).strip()
-    # 5. Max 6 mots
-    return " ".join(clean.split()[:6])
-
-
-def search_vivino(wine_name: str) -> dict | None:
-    """
-    Cherche un vin sur Vivino via la session persistante (cookies requis).
-    Essaie /api/explore/explore puis /api/wines/search en fallback.
-    """
-    query = clean_name_for_vivino(wine_name)
-    if not query:
-        return None
-
-    session = get_vivino_session()
-
-    def parse_record(records):
-        if not records:
-            return None
-        best    = records[0]
-        vintage = best.get("vintage", {})
-        wine    = vintage.get("wine", {})
-        # Stats : chercher dans vintage d'abord, puis wine, puis wine.statistics
-        stats = (vintage.get("statistics")
-                 or wine.get("statistics")
-                 or {})
-        rating = float(stats.get("ratings_average") or 0)
-        count  = int(stats.get("ratings_count") or 0)
-        if not rating:
-            return None
-        seo = wine.get("seo_name","")
-        return {
-            "vivino_name":   wine.get("name",""),
-            "vivino_year":   vintage.get("year",""),
-            "rating":        round(rating, 2),
-            "ratings_count": count,
-            "vivino_url":    f"https://www.vivino.com{seo}" if seo else "",
-        }
-
-    # Tentative 1 : /api/explore/explore
-    try:
-        resp = session.get(
-            "https://www.vivino.com/api/explore/explore",
-            params={"language":"fr","wine_type_ids[]":1,
-                    "q":query,"order_by":"match","per_page":3},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            result = parse_record(
-                resp.json().get("explore_vintage",{}).get("records",[])
-            )
-            if result:
-                return result
-    except Exception:
-        pass
-
-    # Tentative 2 : /api/wines/search (endpoint alternatif)
-    try:
-        resp2 = session.get(
-            "https://www.vivino.com/api/wines/search",
-            params={"q": query, "language": "fr", "per_page": 3},
-            timeout=10,
-        )
-        if resp2.status_code == 200:
-            wines_list = resp2.json().get("wines", [])
-            # Cet endpoint retourne wine directement avec statistics
-            if wines_list:
-                w = wines_list[0]
-                stats  = w.get("statistics", {})
-                rating = float(stats.get("ratings_average") or 0)
-                count  = int(stats.get("ratings_count") or 0)
-                if rating:
-                    seo = w.get("seo_name","")
-                    return {
-                        "vivino_name":   w.get("name",""),
-                        "vivino_year":   "",
-                        "rating":        round(rating, 2),
-                        "ratings_count": count,
-                        "vivino_url":    f"https://www.vivino.com{seo}" if seo else "",
-                    }
-    except Exception:
-        pass
-
-    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -513,32 +458,10 @@ if scrape_btn or not st.session_state.wines:
             st.error("Aucun produit récupéré — réessayez dans quelques instants.")
             st.stop()
 
-        log(f"✅ {len(raw_wines)} vins Blagnac récupérés")
-
-        # 2. Enrichissement Vivino
-        log("🍷 Recherche des notes Vivino…")
-        enriched = []
-        prog = st.progress(0)
-
-        for i, wine in enumerate(raw_wines):
-            vd = search_vivino(wine["name"])
-            if vd:
-                wine.update(vd)
-                wine["ratio"] = (
-                    round((vd["rating"] / wine["price"]) * 10, 3)
-                    if wine["price"] > 0 else 0
-                )
-            else:
-                wine.update({
-                    "rating": None, "ratings_count": 0,
-                    "ratio": 0, "vivino_name": "", "vivino_url": "",
-                })
-            enriched.append(wine)
-            prog.progress((i + 1) / len(raw_wines))
-            time.sleep(0.25)   # respecter le rate-limit Vivino
-
-        st.session_state.wines = enriched
-        status.update(label=f"✅ {len(enriched)} vins analysés !", state="complete")
+        n_rated = sum(1 for w in raw_wines if w.get("rating"))
+        log(f"✅ {len(raw_wines)} vins Blagnac — {n_rated} notes Vivino trouvées")
+        st.session_state.wines = raw_wines
+        status.update(label=f"✅ {len(raw_wines)} vins analysés !", state="complete")
 
 
 # ── Affichage ─────────────────────────────────────────────────────────────────
