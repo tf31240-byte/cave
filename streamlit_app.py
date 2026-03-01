@@ -177,7 +177,7 @@ def get_selenium_driver():
 
 
 def scrape_with_selenium(log=None) -> list[dict]:
-    from selenium.webdriver.by import By
+    from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
 
