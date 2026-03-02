@@ -1,11 +1,10 @@
 """
-Cave Leclerc Blagnac × Vivino
-─────────────────────────────
-Cache JSON persistant sur disque → survit aux déconnexions.
-Scraping Vivino : page recherche → URL /w/{id} → fiche JSON-LD (rating + count).
+Cave Leclerc Blagnac × Vivino - v3
+Améliorations : score composite, bonnes affaires, régions, historique prix,
+                filtre range prix, couverture Vivino, pertinence Vivino, _merge_vivino.
 """
 
-import re, json, time
+import re, json, time, math, unicodedata
 import streamlit as st
 import requests
 import pandas as pd
@@ -16,11 +15,11 @@ from datetime import datetime
 # ═══════════════════════════════════════════════════════════════════════════
 # CONFIG
 # ═══════════════════════════════════════════════════════════════════════════
-STORE_CODE        = "1431"
-MAX_PAGES         = 15
-# Leclerc : cache 12h (on met à jour manuellement via le bouton de toute façon)
-LECLERC_CACHE_TTL = 12 * 3600
-# Vivino : pas de TTL — refresh manuel uniquement
+STORE_CODE            = "1431"
+MAX_PAGES             = 15
+LECLERC_CACHE_TTL     = 12 * 3600
+LECLERC_PAGE_SIZE     = 96
+VIVINO_SIMILARITY_MIN = 0.28   # ⑦ seuil pertinence
 
 CACHE_DIR = Path(__file__).parent / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
@@ -32,38 +31,30 @@ WINE_TYPES = {
     "🍾 Mousseux": "vins-mousseux-et-petillants",
 }
 
-# Essaie 96 articles par page pour aller plus vite (moins de pages à charger)
-LECLERC_PAGE_SIZE = 96
-
 st.set_page_config(
     page_title="Cave Leclerc Blagnac × Vivino",
     page_icon="🍷",
     layout="wide",
-    initial_sidebar_state="collapsed",   # fermé par défaut sur mobile
+    initial_sidebar_state="collapsed",
 )
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CSS  (desktop + mobile responsive)
+# CSS
 # ═══════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Mono&family=DM+Sans:wght@300;400;500&display=swap');
 
-/* ── Base ── */
 html,body,[class*="css"]{font-family:'DM Sans',sans-serif}
 .main-title{font-family:'Playfair Display',serif;font-size:clamp(1.4rem,4vw,2.2rem);
   font-weight:900;color:#1A0810;line-height:1.1}
 .main-title span{color:#C9A84C}
 .subtitle{color:#8B6B72;font-size:.82rem;letter-spacing:.08em;text-transform:uppercase}
 
-/* ── Carte vin ── */
 .wine-card{
-  background:white;border-radius:10px;
-  padding:.8rem 1rem;margin-bottom:.5rem;
-  border-left:4px solid #6B1A2A;
-  box-shadow:0 2px 10px rgba(26,8,16,.08);
-  display:grid;
-  grid-template-columns:2.2rem 1fr auto auto auto;
+  background:white;border-radius:10px;padding:.8rem 1rem;margin-bottom:.5rem;
+  border-left:4px solid #6B1A2A;box-shadow:0 2px 10px rgba(26,8,16,.08);
+  display:grid;grid-template-columns:2.2rem 1fr auto auto auto;
   align-items:center;gap:.6rem}
 .wine-card.top1{border-left-color:#C9A84C;background:#fffdf4}
 .wine-card.top2{border-left-color:#9C9C9C}
@@ -90,38 +81,37 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif}
 
 .wine-price{font-family:'DM Mono',monospace;font-size:1rem;
   font-weight:700;color:#1A0810;text-align:right;white-space:nowrap}
+.p-up  {color:#dc2626;font-size:.7rem;font-weight:700;margin-left:3px}
+.p-down{color:#16a34a;font-size:.7rem;font-weight:700;margin-left:3px}
+.p-eq  {color:#9ca3af;font-size:.7rem;margin-left:3px}
 
-.ratio-wrap{min-width:100px}
-.ratio-num{font-family:'DM Mono';font-size:.75rem;color:#6B1A2A;font-weight:600}
-.ratio-bar{background:rgba(107,26,42,.1);border-radius:3px;height:5px;
+.score-wrap{min-width:100px}
+.score-num{font-family:'DM Mono';font-size:.75rem;color:#6B1A2A;font-weight:600}
+.score-lbl{font-size:.55rem;color:#8B6B72;letter-spacing:.04em}
+.score-bar{background:rgba(107,26,42,.1);border-radius:3px;height:5px;
   overflow:hidden;margin-top:3px}
-.ratio-fill{height:100%;background:linear-gradient(90deg,#6B1A2A,#C9A84C);border-radius:3px}
+.score-fill{height:100%;background:linear-gradient(90deg,#6B1A2A,#C9A84C);border-radius:3px}
 
 .badge{display:inline-block;padding:.1rem .4rem;border-radius:3px;
   font-size:.58rem;font-family:'DM Mono';margin-right:.15rem;margin-top:.2rem}
 .b-deal{background:rgba(201,168,76,.15);color:#8B6030;border:1px solid rgba(201,168,76,.4)}
-.b-top{background:rgba(107,26,42,.08);color:#6B1A2A;border:1px solid rgba(107,26,42,.2)}
+.b-top {background:rgba(107,26,42,.08);color:#6B1A2A;border:1px solid rgba(107,26,42,.2)}
+.b-reg {background:rgba(37,99,235,.06);color:#1d4ed8;border:1px solid rgba(37,99,235,.2)}
 
-/* ── MOBILE : < 640px ── */
 @media (max-width:640px){
-  .wine-card{
-    grid-template-columns:1.8rem 1fr;
-    grid-template-rows:auto auto auto;
-    gap:.3rem}
-  .wine-rating{grid-column:1/3;display:flex;
-    align-items:center;gap:.6rem;justify-content:flex-start;min-width:0}
+  .wine-card{grid-template-columns:1.8rem 1fr;grid-template-rows:auto auto auto;gap:.3rem}
+  .wine-rating{grid-column:1/3;display:flex;align-items:center;
+    gap:.6rem;justify-content:flex-start;min-width:0}
   .stars{display:inline}
   .wine-price{grid-column:1/3;text-align:left;font-size:.95rem}
-  .ratio-wrap{display:none}          /* caché sur mobile */
+  .score-wrap{display:none}
   .wine-name{white-space:normal}
 }
-
-/* ── Sort pills ── */
-.sort-bar{display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.6rem}
-.sort-pill{display:inline-block;padding:.3rem .8rem;border-radius:20px;
-  font-size:.78rem;cursor:pointer;border:1.5px solid #6B1A2A;
-  color:#6B1A2A;background:white;white-space:nowrap;font-family:'DM Mono'}
-.sort-pill.active{background:#6B1A2A;color:white}
+.deal-card{background:linear-gradient(135deg,#fffdf4,#fff8e7);border-radius:12px;
+  padding:1rem;margin-bottom:.6rem;border:1.5px solid #C9A84C;
+  box-shadow:0 2px 12px rgba(201,168,76,.15)}
+.deal-score{font-family:'DM Mono';font-size:1.4rem;font-weight:900;color:#6B1A2A;line-height:1}
+.deal-label{font-size:.6rem;color:#8B6B72;text-transform:uppercase;letter-spacing:.06em}
 </style>
 """, unsafe_allow_html=True)
 
@@ -144,9 +134,12 @@ def load_leclerc_cache(slug: str) -> dict | None:
     return None
 
 def save_leclerc_cache(slug: str, wines: list) -> None:
-    _lec_path(slug).write_text(
-        json.dumps({"cached_at": time.time(), "slug": slug, "wines": wines},
-                   ensure_ascii=False, indent=2), "utf-8")
+    p, tmp = _lec_path(slug), _lec_path(slug).with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps({"cached_at": time.time(), "slug": slug, "wines": wines},
+                       ensure_ascii=False, indent=2), "utf-8")
+        tmp.replace(p)
+    except Exception: tmp.unlink(missing_ok=True); raise
 
 def load_vivino_cache() -> dict:
     p = _viv_path()
@@ -156,7 +149,183 @@ def load_vivino_cache() -> dict:
     return {}
 
 def save_vivino_cache(cache: dict) -> None:
-    _viv_path().write_text(json.dumps(cache, ensure_ascii=False, indent=2), "utf-8")
+    p, tmp = _viv_path(), _viv_path().with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), "utf-8")
+        tmp.replace(p)
+    except Exception: tmp.unlink(missing_ok=True); raise
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CHECKPOINT
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _ckpt_path(slug: str) -> Path: return CACHE_DIR / f"vivino_ckpt_{slug}.json"
+
+def ckpt_load(slug: str) -> dict | None:
+    p = _ckpt_path(slug)
+    if not p.exists(): return None
+    try:
+        d = json.loads(p.read_text("utf-8"))
+        if d.get("finished"): p.unlink(missing_ok=True); return None
+        if time.time() - d.get("started_at", 0) > 86400: p.unlink(missing_ok=True); return None
+        return d
+    except Exception: return None
+
+def ckpt_create(slug: str, total: int) -> None:
+    p, tmp = _ckpt_path(slug), _ckpt_path(slug).with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps({"slug": slug, "started_at": time.time(),
+            "total": total, "done_eans": [], "finished": False},
+            ensure_ascii=False), "utf-8")
+        tmp.replace(p)
+    except Exception: tmp.unlink(missing_ok=True); raise
+
+def ckpt_tick(slug: str, ean: str) -> None:
+    p = _ckpt_path(slug)
+    try:
+        d = json.loads(p.read_text("utf-8"))
+        d["done_eans"].append(ean)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
+        tmp.replace(p)
+    except Exception: pass
+
+def ckpt_finish(slug: str) -> None:
+    _ckpt_path(slug).unlink(missing_ok=True)
+    _ckpt_path(slug).with_suffix(".tmp").unlink(missing_ok=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# HISTORIQUE DES PRIX  ⑨
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _price_hist_path() -> Path: return CACHE_DIR / "price_history.json"
+
+def load_price_history() -> dict:
+    p = _price_hist_path()
+    if p.exists():
+        try: return json.loads(p.read_text("utf-8"))
+        except Exception: pass
+    return {}
+
+def save_price_history(hist: dict) -> None:
+    p, tmp = _price_hist_path(), _price_hist_path().with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(hist, ensure_ascii=False, indent=2), "utf-8")
+        tmp.replace(p)
+    except Exception: tmp.unlink(missing_ok=True)
+
+def update_price_history(wines: list) -> None:
+    """Enregistre le prix du jour pour chaque vin (EAN). Max 10 relevés."""
+    hist  = load_price_history()
+    today = datetime.now().strftime("%Y-%m-%d")
+    for w in wines:
+        ean = w.get("ean")
+        if not ean or not w.get("price"): continue
+        entry = hist.setdefault(ean, {"name": w["name"], "history": []})
+        entry["name"] = w["name"]
+        if not entry["history"] or entry["history"][-1]["date"] != today:
+            entry["history"].append({"date": today, "price": w["price"]})
+            entry["history"] = entry["history"][-10:]
+    save_price_history(hist)
+
+def price_trend(ean: str, current_price: float, ph: dict) -> str:
+    """'↑' '↓' '=' ou '' selon l'évolution vs le relevé précédent."""
+    if not ean: return ""
+    h = ph.get(ean, {}).get("history", [])
+    if len(h) < 2: return ""
+    prev = h[-2]["price"]
+    if current_price > prev + 0.05: return "↑"
+    if current_price < prev - 0.05: return "↓"
+    return "="
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SCORE COMPOSITE  ①
+# ═══════════════════════════════════════════════════════════════════════════
+
+def compute_score(rating, ratings_count, price) -> float:
+    """
+    Score composite qualité/prix.
+    confidence = min(1.0, sqrt(nb_avis) / 100)
+      10 000 avis → confiance 1.0   |   100 avis → 0.10   |   25 avis → 0.05
+    score = note × confiance / prix × 10
+    """
+    if not rating or not price or price <= 0: return 0.0
+    confidence = min(1.0, math.sqrt(ratings_count or 0) / 100)
+    return round(rating * confidence / price * 10, 2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# RÉGIONS / APPELLATIONS  ③
+# ═══════════════════════════════════════════════════════════════════════════
+
+_REGIONS = [
+    "Saint-Émilion Grand Cru","Saint-Émilion","Pomerol","Fronsac",
+    "Pauillac","Saint-Estèphe","Margaux","Saint-Julien","Listrac","Moulis",
+    "Haut-Médoc","Médoc","Pessac-Léognan","Graves","Entre-Deux-Mers",
+    "Bordeaux Supérieur","Bordeaux",
+    "Gevrey-Chambertin","Nuits-Saint-Georges","Pommard","Volnay","Beaune",
+    "Aloxe-Corton","Meursault","Puligny-Montrachet","Chablis",
+    "Mâcon","Pouilly-Fuissé","Bourgogne",
+    "Châteauneuf-du-Pape","Gigondas","Vacqueyras","Rasteau",
+    "Crozes-Hermitage","Hermitage","Cornas","Saint-Joseph",
+    "Côtes du Rhône Villages","Côtes du Rhône",
+    "Bandol","Côtes de Provence","Provence",
+    "Pic Saint-Loup","Terrasses du Larzac",
+    "Faugères","Saint-Chinian","Minervois","Corbières","Fitou","La Clape","Languedoc",
+    "Côtes du Roussillon Villages","Côtes du Roussillon","Roussillon",
+    "Cahors","Madiran","Bergerac","Pécharmant","Fronton","Gaillac","Marcillac","Irouléguy",
+    "Saumur-Champigny","Saumur","Bourgueil","Saint-Nicolas-de-Bourgueil","Chinon",
+    "Anjou","Muscadet","Sancerre","Pouilly-Fumé","Loire",
+    "Fleurie","Moulin-à-Vent","Morgon","Brouilly","Beaujolais Villages","Beaujolais",
+    "Alsace","Côtes de Gascogne","Pays d'Oc","Vin de France",
+]
+
+def extract_region(wine_name: str) -> str:
+    def _n(s):
+        return unicodedata.normalize("NFD", s).encode("ascii","ignore").decode().lower()
+    m = re.search(r"-\s*([\w\s\-\']+?)\s*(?:AOP|IGP|AOC|AOP-AOC)\b", wine_name, re.I)
+    if m:
+        raw = m.group(1).strip()
+        for r in _REGIONS:
+            if _n(raw) == _n(r): return r
+        for r in _REGIONS:
+            if _n(raw) in _n(r) or _n(r) in _n(raw): return r
+        if len(raw) > 2: return raw.title()
+    name_n = _n(wine_name)
+    for r in _REGIONS:
+        if _n(r) in name_n: return r
+    return ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# _MERGE_VIVINO — source de vérité unique  ④
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _merge_vivino(wines: list, vc: dict, ph: dict | None = None) -> list:
+    """Injecte données Vivino + calcule score/région/tendance prix."""
+    if ph is None: ph = {}
+    for w in wines:
+        key = build_query(w["name"])
+        cv  = vc.get(key, {})
+        w.setdefault("available", True)
+        if cv.get("rating") is not None or cv.get("vivino_url"):
+            for k, v in cv.items():
+                if k != "cached_at": w[k] = v
+        w.setdefault("rating", None);      w.setdefault("ratings_count", 0)
+        w.setdefault("vivino_url", "");    w.setdefault("vivino_year", None)
+        w.setdefault("vintage_match", None)
+        w["score"]       = compute_score(w.get("rating"), w.get("ratings_count"), w.get("price"))
+        w["region"]      = extract_region(w["name"])
+        w["price_trend"] = price_trend(w.get("ean",""), w.get("price") or 0, ph)
+    return wines
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UTILITAIRES
+# ═══════════════════════════════════════════════════════════════════════════
 
 def fmt_age(ts: float) -> str:
     if not ts: return "importé"
@@ -172,10 +341,7 @@ def fmt_age(ts: float) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def leclerc_url(slug: str, page: int = 1) -> str:
-    """URL avec pageSize=96 pour réduire le nb de pages à charger."""
-    base = f"https://www.e.leclerc/cat/{slug}"
-    params = f"pageSize={LECLERC_PAGE_SIZE}&page={page}"
-    return f"{base}?{params}#oaf-sign-code={STORE_CODE}"
+    return f"https://www.e.leclerc/cat/{slug}?pageSize={LECLERC_PAGE_SIZE}&page={page}#oaf-sign-code={STORE_CODE}"
 
 def _parse_price(card) -> float:
     blk = card.find(class_=lambda c: c and "block-price-and-availability" in c.split())
@@ -193,7 +359,7 @@ def _parse_price(card) -> float:
 def parse_cards(html: str) -> list:
     wines = []
     for card in BeautifulSoup(html, "html.parser").find_all("app-product-card"):
-        lbl = card.find(class_="product-label")
+        lbl  = card.find(class_="product-label")
         name = lbl.get_text(strip=True) if lbl else ""
         if not name: continue
         lnk  = card.find("a", href=True)
@@ -204,7 +370,7 @@ def parse_cards(html: str) -> list:
         if not ean:
             m2 = re.search(r"-(\d{13})$", url)
             ean = m2.group(1) if m2 else ""
-        img = card.find("img")
+        img   = card.find("img")
         image = ""
         if img:
             image = img.get("src") or img.get("data-src") or \
@@ -223,49 +389,51 @@ def get_nb_pages(html: str) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# VIVINO — query + parsing
+# VIVINO — query + parsing + pertinence  ⑦
 # ═══════════════════════════════════════════════════════════════════════════
 
 def build_query(wine_name: str) -> str:
     nom = re.split(r",\s*|\s+-\s+", wine_name)[0].strip()
     nom = re.sub(r"^(Magnum|Demi-bouteille)\s+", "", nom, flags=re.I).strip()
     nom = re.sub(r"\b(19|20)\d{2}\b", "", nom).strip().strip("-").strip()
-    if re.match(r"^[A-Z][A-Z\s'\-]+$", nom): nom = nom.title()
-    cut = {"Cuvée", "Cuvee", "Vieilles", "Vieille", "Grande"}
+    if re.match(r"^[A-Z][A-Z\s\'\-]+$", nom): nom = nom.title()
+    cut   = {"Cuvée","Cuvee","Vieilles","Vieille","Grande"}
     words = nom.split()
     for i, w in enumerate(words[2:], 2):
         if w in cut: nom = " ".join(words[:i]); break
-    m = re.search(r"-\s*([\w\s\-]+?)\s*(?:AOP|IGP|AOC|Vin de France)", wine_name, re.I)
+    m   = re.search(r"-\s*([\w\s\-]+?)\s*(?:AOP|IGP|AOC|Vin de France)", wine_name, re.I)
     app = m.group(1).strip() if m else ""
     parts = [nom]
     if app and app.lower() not in nom.lower(): parts.append(app)
-    return " ".join(parts)
+    result = " ".join(parts).strip()
+    return result if result else wine_name[:40].strip()
 
+def _norm_words(s: str) -> set:
+    STOP = {"de","du","des","le","la","les","et","au","aux","en","par","sur",
+            "un","une","the","of","and","for","vin","wines","wine"}
+    ascii_s = unicodedata.normalize("NFD", s).encode("ascii","ignore").decode()
+    return {w.lower() for w in re.findall(r"[a-z]{3,}", ascii_s.lower())
+            if w.lower() not in STOP}
 
-def vivino_url_from_search(html: str) -> str | None:
-    """
-    Trouve la 1ère URL de fiche vin dans la page de recherche Vivino.
-    Les URLs Vivino sont de la forme /fr/nom-du-vin/w/12345
-    → on cherche le pattern /w/{id} (avec id numérique).
-    """
+def _name_similarity(name1: str, name2: str) -> float:
+    w1, w2 = _norm_words(name1), _norm_words(name2)
+    if not w1 or not w2: return 0.0
+    return len(w1 & w2) / min(len(w1), len(w2))
+
+def vivino_url_from_search(html: str) -> tuple:
+    """Retourne (url, title) du 1er résultat Vivino ou (None, '')."""
     soup = BeautifulSoup(html, "html.parser")
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        # Pattern réel Vivino : /fr/wine-name/w/12345 ou /wine-name/w/12345
         if re.search(r"/w/\d+", href) and "search" not in href:
-            return href if href.startswith("http") else f"https://www.vivino.com{href}"
-    return None
-
+            url   = href if href.startswith("http") else f"https://www.vivino.com{href}"
+            title = a.get_text(separator=" ", strip=True)
+            return url, title
+    return None, ""
 
 def parse_wine_jsonld(html: str) -> dict:
-    """
-    Extrait note + nb avis depuis la fiche Vivino via JSON-LD aggregateRating.
-    C'est la source la plus fiable — injectée côté serveur, toujours présente.
-    """
     rating, count = None, 0
     soup = BeautifulSoup(html, "html.parser")
-
-    # ── 1. JSON-LD <script type="application/ld+json"> ─────────────────────
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data  = json.loads(script.string or "")
@@ -276,15 +444,13 @@ def parse_wine_jsonld(html: str) -> dict:
                 rv = ag.get("ratingValue")
                 rc = ag.get("ratingCount") or ag.get("reviewCount")
                 if rv:
-                    v = round(float(str(rv).replace(",", ".")), 1)
+                    v = round(float(str(rv).replace(",",".")), 1)
                     if 2.5 <= v <= 5.0: rating = v
                 if rc:
                     count = int(re.sub(r"[^\d]", "", str(rc)) or 0)
                 if rating: break
         except Exception: pass
         if rating: break
-
-    # ── 2. JSON inline (ratings_average / ratings_count) ───────────────────
     if not rating:
         m = re.search(r'"ratings_average"\s*:\s*([\d.]+)', html)
         if m:
@@ -293,19 +459,16 @@ def parse_wine_jsonld(html: str) -> dict:
     if not count:
         m = re.search(r'"ratings_count"\s*:\s*(\d+)', html)
         if m: count = int(m.group(1))
-
-    # ── 3. Classes React hashées (dernier recours) ──────────────────────────
     if not rating:
         for el in soup.find_all(class_=lambda c: c and "averageValue" in c):
             try:
-                v = round(float(el.get_text(strip=True).replace(",", ".")), 1)
+                v = round(float(el.get_text(strip=True).replace(",",".")), 1)
                 if 2.5 <= v <= 5.0: rating = v; break
             except ValueError: pass
     if not count:
         for el in soup.find_all(class_=lambda c: c and "numRatings" in c):
             d = re.sub(r"[^\d]", "", el.get_text())
             if d: count = int(d); break
-
     return {"rating": rating, "ratings_count": count}
 
 
@@ -319,8 +482,8 @@ def make_driver():
     from selenium.webdriver.chrome.options import Options
     import os
     opts = Options()
-    for arg in ["--headless", "--no-sandbox", "--disable-dev-shm-usage",
-                "--disable-gpu", "--window-size=1280,900",
+    for arg in ["--headless","--no-sandbox","--disable-dev-shm-usage",
+                "--disable-gpu","--window-size=1280,900",
                 "--disable-blink-features=AutomationControlled"]:
         opts.add_argument(arg)
     opts.add_argument(
@@ -328,21 +491,19 @@ def make_driver():
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
-    for b in ["/usr/bin/chromium", "/usr/bin/chromium-browser",
-              "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"]:
+    for b in ["/usr/bin/chromium","/usr/bin/chromium-browser",
+              "/usr/bin/google-chrome","/usr/bin/google-chrome-stable"]:
         if os.path.exists(b): opts.binary_location = b; break
-    for d in ["/usr/bin/chromedriver", "/usr/lib/chromium/chromedriver",
+    for d in ["/usr/bin/chromedriver","/usr/lib/chromium/chromedriver",
               "/usr/lib/chromium-browser/chromedriver"]:
         if os.path.exists(d): return webdriver.Chrome(service=Service(d), options=opts)
     return webdriver.Chrome(options=opts)
 
 
 def scrape_leclerc_full(slug: str, log=None) -> list:
-    """Scrape toutes les pages Leclerc avec pageSize=96."""
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
-
     driver = make_driver()
     wines, seen = [], set()
     try:
@@ -373,18 +534,14 @@ def scrape_leclerc_full(slug: str, log=None) -> list:
     finally:
         try: driver.quit()
         except: pass
+    update_price_history(wines)   # ⑨
     return wines
 
 
 def check_availability(slug: str, cached_wines: list, log=None) -> list:
-    """
-    Vérifie les EANs actuellement en rayon à Blagnac.
-    Plus léger qu'un scrape complet : on veut juste savoir quels vins sont dispo.
-    """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
-
     current_eans = set()
     driver = make_driver()
     try:
@@ -403,47 +560,42 @@ def check_availability(slug: str, cached_wines: list, log=None) -> list:
     finally:
         try: driver.quit()
         except: pass
-
+    if not current_eans:
+        if log: log("⚠️ Aucun EAN récupéré — site Leclerc inaccessible ? Disponibilité non mise à jour.")
+        return cached_wines
     for w in cached_wines:
-        w["available"] = w.get("ean", "") in current_eans
+        w["available"] = w.get("ean","") in current_eans
+    update_price_history(cached_wines)   # ⑨
     nok = sum(1 for w in cached_wines if w.get("available"))
     if log: log(f"✅ {nok} dispo, {len(cached_wines)-nok} indispo à Blagnac")
     return cached_wines
 
 
-def fetch_vivino(driver, wine_name: str, vintage: int | None) -> dict:
-    """
-    2 navigations : page recherche → URL fiche (/w/{id}) → fiche JSON-LD.
-    Fix clé : le pattern /w/\\d+ au lieu de /wines/... (erreur précédente).
-    """
+def fetch_vivino(driver, wine_name: str, vintage) -> dict:
+    """⑦ 2 navigations avec vérification de pertinence du 1er résultat."""
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
-
     EMPTY = {"rating": None, "ratings_count": 0,
              "vivino_url": "", "vivino_year": None, "vintage_match": None}
     query = build_query(wine_name)
-
-    # ── Étape 1 : page de recherche → URL de la fiche ──────────────────────
     try:
         driver.get(f"https://www.vivino.com/search/wines"
                    f"?q={requests.utils.quote(query)}&language=fr")
-        # Attendre qu'une carte vin soit visible
         try: WebDriverWait(driver, 9).until(
             EC.presence_of_element_located(
                 (By.CSS_SELECTOR,
-                 "[class*='wineCard'],[class*='wine-card'],[class*='averageValue'],"
-                 "[href*='/w/']")))
+                 "[class*='wineCard'],[class*='wine-card'],[class*='averageValue'],[href*='/w/']")))
         except Exception: pass
         time.sleep(1)
-        wine_url = vivino_url_from_search(driver.page_source)
+        wine_url, vivino_title = vivino_url_from_search(driver.page_source)
     except Exception:
         return EMPTY
-
     if not wine_url:
         return EMPTY
-
-    # ── Étape 2 : fiche du vin → JSON-LD ───────────────────────────────────
+    # ⑦ Vérification pertinence
+    if vivino_title and _name_similarity(query, vivino_title) < VIVINO_SIMILARITY_MIN:
+        return EMPTY
     try:
         driver.get(wine_url)
         try: WebDriverWait(driver, 9).until(
@@ -454,19 +606,15 @@ def fetch_vivino(driver, wine_name: str, vintage: int | None) -> dict:
         d = parse_wine_jsonld(driver.page_source)
     except Exception:
         return EMPTY
-
-    if not d.get("rating"):
-        return EMPTY
-
-    # Millésime depuis l'URL finale (?year=2023)
     vy = None
     m  = re.search(r"[?&]year=(\d{4})", driver.current_url)
     if m: vy = int(m.group(1))
-
     vmatch = None
     if vintage and vy: vmatch = (vintage == vy)
     elif not vintage:  vmatch = True
-
+    if not d.get("rating"):
+        return {"rating": None, "ratings_count": 0,
+                "vivino_url": wine_url, "vivino_year": vy, "vintage_match": vmatch}
     return {"rating": d["rating"], "ratings_count": d["ratings_count"],
             "vivino_url": wine_url, "vivino_year": vy, "vintage_match": vmatch}
 
@@ -476,50 +624,17 @@ def fetch_vivino(driver, wine_name: str, vintage: int | None) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def load_wines_from_cache(slug: str) -> list:
-    """
-    Charge les vins depuis le cache Leclerc + cache Vivino.
-    Retourne une liste enrichie sans aucun scraping.
-    Appelé au premier chargement de la page.
-    """
     lc = load_leclerc_cache(slug)
-    vc = load_vivino_cache()
-    if not lc:
-        return []
-    wines = lc["wines"]
-    for w in wines:
-        key = build_query(w["name"])
-        cv  = vc.get(key, {})
-        w.setdefault("available", True)
-        if cv.get("rating") is not None:
-            for k, v in cv.items():
-                if k != "cached_at": w[k] = v
-            w["ratio"] = round((cv["rating"] / w["price"]) * 10, 3) \
-                         if w.get("price", 0) > 0 else 0
-        else:
-            w.setdefault("rating", None)
-            w.setdefault("ratings_count", 0)
-            w.setdefault("ratio", 0)
-            w.setdefault("vivino_url", "")
-            w.setdefault("vivino_year", None)
-            w.setdefault("vintage_match", None)
-    return wines
+    if not lc: return []
+    return _merge_vivino(lc["wines"], load_vivino_cache(), load_price_history())
 
 
 def run_check_stock(slug: str, log=None) -> list:
-    """
-    Vérifie uniquement la disponibilité Leclerc (bouton 🔄).
-    Recharge le cache Leclerc si expiré, sinon juste EANs actuels.
-    Notes Vivino = cache, pas de scraping Vivino.
-    """
     lc = load_leclerc_cache(slug)
     vc = load_vivino_cache()
-    now = time.time()
-
     if lc:
         if log: log(f"📦 Cache Leclerc ({fmt_age(lc['cached_at'])}) — vérif. stock…")
-        wines = lc["wines"]
-        wines = check_availability(slug, wines, log=log)
-        # Mettre à jour le cache avec les nouvelles disponibilités
+        wines = check_availability(slug, lc["wines"], log=log)
         save_leclerc_cache(slug, wines)
     else:
         if log: log("🚀 Pas de cache — scrape Leclerc complet…")
@@ -527,31 +642,52 @@ def run_check_stock(slug: str, log=None) -> list:
         for w in wines: w["available"] = True
         save_leclerc_cache(slug, wines)
         if log: log(f"💾 Cache Leclerc sauvegardé ({len(wines)} vins)")
+    return _merge_vivino(wines, vc, load_price_history())
 
-    # Injecter Vivino depuis le cache
-    for w in wines:
-        key = build_query(w["name"])
-        cv  = vc.get(key, {})
-        if cv.get("rating") is not None:
-            for k, v in cv.items():
-                if k != "cached_at": w[k] = v
-            w["ratio"] = round((cv["rating"] / w["price"]) * 10, 3) \
-                         if w.get("price", 0) > 0 else 0
+
+def _scrape_vivino_list(slug, wines, todo, vc, log):
+    """Boucle de scraping Vivino mutualisée pour run_refresh et run_fill."""
+    now = time.time()
+    found = 0
+    done_count = len(wines) - len(todo)
+    interrupted = False
+    driver = make_driver()
+    try:
+        for wine in todo:
+            ean = wine.get("ean") or build_query(wine["name"])
+            vd  = fetch_vivino(driver, wine["name"], wine.get("vintage"))
+            key = build_query(wine["name"])
+            vc[key] = {**vd, "cached_at": now}
+            save_vivino_cache(vc)
+            ckpt_tick(slug, ean)
+            done_count += 1
+            if vd.get("rating"):
+                found += 1
+                cnt_s = f"{vd['ratings_count']:,}".replace(",", "\u202f") \
+                        if vd["ratings_count"] else "—"
+                if log: log(f"  ✅ [{done_count}/{len(wines)}] {wine['name'][:38]}\n"
+                            f"     ★ {vd['rating']} · {cnt_s} avis")
+            else:
+                if log and done_count % 5 == 0:
+                    log(f"  🍷 [{done_count}/{len(wines)}] — {found} notes trouvées")
+            time.sleep(0.3)
+    except Exception as e:
+        interrupted = True
+        if log: log(f"⚠️ Interrompu à [{done_count}/{len(wines)}] : {e}")
+    finally:
+        try: driver.quit()
+        except: pass
+        save_vivino_cache(vc)
+        remaining = len(wines) - done_count
+        if interrupted or remaining > 0:
+            if log: log(f"\n⚠️ {done_count}/{len(wines)} traités · {remaining} restants\n"
+                        f"💡 Cliquez **▶️ Reprendre** pour continuer")
         else:
-            w.setdefault("rating", None)
-            w.setdefault("ratings_count", 0)
-            w.setdefault("ratio", 0)
-            w.setdefault("vivino_url", "")
-            w.setdefault("vivino_year", None)
-            w.setdefault("vintage_match", None)
-    return wines
+            ckpt_finish(slug)
+            if log: log(f"✅ Terminé — {found} notes · {len(vc)} entrées cache")
 
 
-def run_refresh_vivino(slug: str, log=None) -> list:
-    """
-    Re-scrape Vivino pour TOUS les vins (bouton 🍷).
-    Lent (~3s/vin) mais récupère notes + nb avis + URL.
-    """
+def run_refresh_vivino(slug: str, resume: bool = False, log=None) -> list:
     lc = load_leclerc_cache(slug)
     if not lc:
         if log: log("🚀 Pas de cache Leclerc — scrape complet…")
@@ -561,37 +697,45 @@ def run_refresh_vivino(slug: str, log=None) -> list:
     else:
         wines = lc["wines"]
         for w in wines: w.setdefault("available", True)
+    vc   = load_vivino_cache()
+    ckpt = ckpt_load(slug) if resume else None
+    if ckpt:
+        done_eans = set(ckpt["done_eans"])
+        n_done    = len(done_eans)
+        if log: log(f"🔁 Reprise : {n_done}/{len(wines)} ({int(100*n_done/max(len(wines),1))}%) déjà traités")
+    else:
+        done_eans = set()
+        ckpt_create(slug, len(wines))
+    todo = [w for w in wines if (w.get("ean") or build_query(w["name"])) not in done_eans]
+    if not todo:
+        if log: log("✅ Tous les vins sont déjà dans le cache !")
+        ckpt_finish(slug)
+    else:
+        n_skip = len(wines) - len(todo)
+        if log: log(f"🍷 {len(todo)} vins à scraper" + (f" ({n_skip} ignorés)" if n_skip else "") + "…")
+        _scrape_vivino_list(slug, wines, todo, vc, log)
+    return _merge_vivino(wines, vc, load_price_history())
 
-    vc  = load_vivino_cache()
-    now = time.time()
 
-    if log: log(f"🍷 Scraping Vivino — {len(wines)} vins (search → fiche JSON-LD)…")
-    driver = make_driver()
-    found  = 0
-    try:
-        for i, wine in enumerate(wines):
-            vd  = fetch_vivino(driver, wine["name"], wine.get("vintage"))
-            wine.update(vd)
-            wine["ratio"] = round((vd["rating"] / wine["price"]) * 10, 3) \
-                            if vd.get("rating") and wine.get("price", 0) > 0 else 0
-            key = build_query(wine["name"])
-            vc[key] = {**vd, "cached_at": now}
-            if vd.get("rating"):
-                found += 1
-                cnt_s = f"{vd['ratings_count']:,}".replace(",", "\u202f") \
-                        if vd["ratings_count"] else "—"
-                if log: log(f"  ✅ {wine['name'][:42]}\n"
-                            f"     ★ {vd['rating']} · {cnt_s} avis")
-            if (i + 1) % 10 == 0 or i == len(wines) - 1:
-                if log: log(f"  🍷 {i+1}/{len(wines)} — {found} notes trouvées")
-            time.sleep(0.3)
-    finally:
-        try: driver.quit()
-        except: pass
-
-    save_vivino_cache(vc)
-    if log: log(f"💾 Cache Vivino sauvegardé ({found}/{len(wines)} notes)")
-    return wines
+def run_fill_missing_vivino(slug: str, log=None) -> list:
+    """② Scrape uniquement les vins sans note ET sans URL Vivino."""
+    lc = load_leclerc_cache(slug)
+    if not lc:
+        if log: log("❌ Pas de cache Leclerc. Lancez d'abord 🔄 Vérifier disponibilité.")
+        return []
+    vc    = load_vivino_cache()
+    wines = lc["wines"]
+    for w in wines: w.setdefault("available", True)
+    missing = [w for w in wines
+               if not vc.get(build_query(w["name"]), {}).get("rating")
+               and not vc.get(build_query(w["name"]), {}).get("vivino_url")]
+    if not missing:
+        if log: log("✅ Tous les vins ont déjà une note ou un lien Vivino !")
+        return _merge_vivino(wines, vc, load_price_history())
+    if log: log(f"🔍 {len(missing)}/{len(wines)} vins sans données Vivino…")
+    ckpt_create(slug, len(missing))
+    _scrape_vivino_list(slug, missing, missing, vc, log)
+    return _merge_vivino(wines, vc, load_price_history())
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -606,33 +750,24 @@ def fmt_count(n: int) -> str:
     return f"{n:,}".replace(",", "\u202f")
 
 
-def wine_card_html(wine: dict, rank: int, max_ratio: float) -> str:
-    cls = {1:"top1", 2:"top2", 3:"top3"}.get(rank, "")
+def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
+    cls = {1:"top1",2:"top2",3:"top3"}.get(rank, "")
     if wine.get("vintage_match") is False: cls = (cls + " vintage-warn").strip()
     if not wine.get("available", True):    cls = (cls + " unavailable").strip()
+    icon = {1:"🥇",2:"🥈",3:"🥉"}.get(rank, f"<span style='font-size:.75rem'>#{rank}</span>")
 
-    icon = {1:"🥇", 2:"🥈", 3:"🥉"}.get(rank, f"<span style='font-size:.75rem'>#{rank}</span>")
-
-    # Nom (lien Leclerc direct)
     name = wine["name"]
-    if wine.get("url"):
-        name_html = (f'<a href="{wine["url"]}" target="_blank" '
-                     f'style="color:#1A0810;text-decoration:none">{name}</a>')
-    else:
-        name_html = name
-
+    name_html = (f'<a href="{wine["url"]}" target="_blank" '
+                 f'style="color:#1A0810;text-decoration:none">{name}</a>'
+                 ) if wine.get("url") else name
     yr = (f' <span style="color:#8B6B72;font-size:.68rem;font-weight:400">'
           f'{wine["vintage"]}</span>') if wine.get("vintage") else ""
     unavail = (' <span style="font-size:.62rem;color:#dc2626">⛔ indispo</span>'
                if not wine.get("available", True) else "")
-
-    # Alerte millésime
     mil = ""
     if wine.get("vivino_year") and wine.get("vintage") and wine["vivino_year"] != wine["vintage"]:
         mil = (f'<div class="wine-sub" style="color:#c17a00">'
                f'⚠️ Vivino={wine["vivino_year"]} / Leclerc={wine["vintage"]}</div>')
-
-    # Liens 🛒 Leclerc et 🍷 Vivino
     links = []
     if wine.get("url"):
         links.append(f'<a href="{wine["url"]}" target="_blank" class="lnk lnk-lec">🛒 Leclerc</a>')
@@ -640,14 +775,14 @@ def wine_card_html(wine: dict, rank: int, max_ratio: float) -> str:
         links.append(f'<a href="{wine["vivino_url"]}" target="_blank" class="lnk lnk-viv">🍷 Vivino</a>')
     links_html = (f'<div class="wine-links">' + "".join(links) + "</div>") if links else ""
 
-    # Badges
-    ratio  = wine.get("ratio") or 0
+    score  = wine.get("score") or 0
     rating = wine.get("rating")
+    region = wine.get("region", "")
     badges = ""
-    if ratio > 0 and rank <= 5:  badges += '<span class="badge b-deal">🔥 Top ratio</span>'
-    if rating and rating >= 4.2: badges += '<span class="badge b-top">★ Top noté</span>'
+    if score > 0 and rank <= 5:  badges += '<span class="badge b-deal">🔥 Top score</span>'
+    if rating and rating >= 4.2:  badges += '<span class="badge b-top">★ Top noté</span>'
+    if region:                    badges += f'<span class="badge b-reg">{region}</span>'
 
-    # Note Vivino
     if rating:
         cnt = wine.get("ratings_count") or 0
         rating_col = (f'<div class="wine-rating">'
@@ -658,28 +793,42 @@ def wine_card_html(wine: dict, rank: int, max_ratio: float) -> str:
     else:
         rating_col = '<div class="no-rat">—<br>Vivino</div>'
 
-    # Ratio (barre)
-    pct = min(100, (ratio / max_ratio) * 100) if max_ratio > 0 else 0
-    ratio_col = (
-        f'<div class="ratio-wrap">'
-        f'<div class="ratio-num">{ratio:.3f}</div>'
-        f'<div class="ratio-bar"><div class="ratio-fill" style="width:{pct:.1f}%"></div></div>'
-        f'</div>'
-    ) if ratio else '<div class="ratio-wrap" style="color:#ccc;font-size:.72rem">—</div>'
+    # ⑨ tendance prix
+    trend = wine.get("price_trend", "")
+    trend_html = {"↑":'<span class="p-up">↑</span>',
+                  "↓":'<span class="p-down">↓</span>',
+                  "=":'<span class="p-eq">=</span>'}.get(trend, "")
+    price_s = f'{wine.get("price") or 0:.2f} €'.replace(".", ",")
 
-    price_s = f'{wine["price"]:.2f} €'.replace(".", ",")
+    # ① score composite
+    pct = min(100, (score / max_score) * 100) if max_score > 0 else 0
+    score_col = (
+        f'<div class="score-wrap">'
+        f'<div class="score-num">{score:.2f}</div>'
+        f'<div class="score-lbl">score</div>'
+        f'<div class="score-bar"><div class="score-fill" style="width:{pct:.1f}%"></div></div>'
+        f'</div>'
+    ) if score else '<div class="score-wrap" style="color:#ccc;font-size:.72rem">—</div>'
 
     return (f'<div class="wine-card {cls}">'
             f'<div class="wine-rank">{icon}</div>'
             f'<div class="wine-info">'
             f'<div class="wine-name">{name_html}{yr}{unavail}</div>'
-            f'{mil}{links_html}'
-            f'<div>{badges}</div>'
+            f'{mil}{links_html}<div>{badges}</div>'
             f'</div>'
             f'{rating_col}'
-            f'<div class="wine-price">{price_s}</div>'
-            f'{ratio_col}'
+            f'<div class="wine-price">{price_s}{trend_html}</div>'
+            f'{score_col}'
             f'</div>')
+
+
+def _make_logger(max_lines: int = 10):
+    import streamlit as _st
+    logs, box = [], _st.empty()
+    def _log(msg: str):
+        logs.append(msg)
+        box.markdown("\n\n".join(logs[-max_lines:]))
+    return _log, box
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -691,11 +840,8 @@ st.markdown('<div class="main-title">Cave <span>Leclerc Blagnac</span> × Vivino
 st.markdown('<div class="subtitle">Comparateur qualité / prix · Blagnac</div>',
             unsafe_allow_html=True)
 
-# ── SESSION STATE ─────────────────────────────────────────────────────────
-# On utilise un flag explicite pour ne pas re-déclencher sur chaque filtre/tri
-for k, v in [("wines", []), ("loaded_slug", None), ("data_ready", False)]:
-    if k not in st.session_state:
-        st.session_state[k] = v
+for k, v in [("wines",[]),("loaded_slug",None),("data_ready",False)]:
+    if k not in st.session_state: st.session_state[k] = v
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -706,95 +852,138 @@ with st.sidebar:
     st.divider()
     st.markdown("### 🔄 Mise à jour")
 
-    # Statut cache
     lc = load_leclerc_cache(slug)
     vc = load_vivino_cache()
-    n_note  = sum(1 for v in vc.values() if v.get("rating"))
-    n_count = sum(1 for v in vc.values() if (v.get("ratings_count") or 0) > 0)
-    n_url   = sum(1 for v in vc.values() if v.get("vivino_url"))
 
-    st.caption(f"📦 **Leclerc** : {fmt_age(lc['cached_at']) if lc else '❌ pas de cache'}")
-    st.caption(f"🍷 **Vivino** : {n_note} notes · {n_count} nb avis · {n_url} URLs")
+    # ⑥ Stats couverture
+    if lc:
+        n_total   = len(lc["wines"])
+        n_rated   = sum(1 for w in lc["wines"]
+                        if vc.get(build_query(w["name"]), {}).get("rating"))
+        n_missing = n_total - n_rated
+        cov_pct   = int(100 * n_rated / max(n_total, 1))
+        st.caption(f"📦 **Leclerc** : {fmt_age(lc['cached_at'])} · {n_total} vins")
+        st.caption(f"🍷 **Vivino** : {n_rated}/{n_total} ({cov_pct}%)"
+                   + (f" · ⚠️ {n_missing} manquants" if n_missing else " · ✅ complet"))
+    else:
+        n_missing = 0
+        st.caption("📦 **Leclerc** : ❌ pas de cache")
+        st.caption("🍷 **Vivino** : —")
 
-    st.info(
-        "💡 **Les données sont en cache sur le serveur.**\n\n"
-        "Si vous avez déjà cliqué sur un bouton, revenez plus tard : "
-        "les données se chargent instantanément depuis le cache.",
-        icon=None,
-    )
+    st.info("💡 **Les données sont en cache sur le serveur.**\n\n"
+            "Revenez plus tard : les données se chargent instantanément.", icon=None)
 
-    btn_stock  = st.button("🔄 Vérifier disponibilité",
-                           use_container_width=True, type="primary",
+    btn_stock  = st.button("🔄 Vérifier disponibilité", use_container_width=True, type="primary",
                            help="Vérifie les vins en rayon. Vivino depuis le cache.")
-    btn_vivino = st.button("🍷 Rafraîchir notes Vivino",
-                           use_container_width=True,
-                           help="Re-scrape Vivino : lent ~3s/vin mais récupère note + nb avis + URL.")
-    st.caption(f"📍 Leclerc Blagnac · magasin {STORE_CODE}")
+    btn_vivino = st.button("🍷 Rafraîchir toutes les notes", use_container_width=True,
+                           help="Re-scrape Vivino intégral : ~3s/vin.")
+    btn_fill = False
+    if n_missing > 0 and lc:
+        btn_fill = st.button(f"🔎 Compléter les manquants ({n_missing})",
+                             use_container_width=True,
+                             help=f"Scrape uniquement les {n_missing} vins sans données Vivino.")
 
+    ckpt = ckpt_load(slug)
+    btn_resume = False
+    if ckpt:
+        n_done = len(ckpt["done_eans"])
+        pct    = int(100 * n_done / max(ckpt["total"], 1))
+        st.warning(f"⚠️ **Scraping interrompu**\n\n"
+                   f"{n_done}/{ckpt['total']} vins traités ({pct}%)\n\n"
+                   f"Lancé {fmt_age(ckpt['started_at'])}", icon=None)
+        col_r, col_x = st.columns(2)
+        with col_r: btn_resume = st.button("▶️ Reprendre", use_container_width=True, type="primary")
+        with col_x:
+            if st.button("✖ Annuler", use_container_width=True):
+                ckpt_finish(slug); st.rerun()
+
+    st.caption(f"📍 Leclerc Blagnac · magasin {STORE_CODE}")
     st.divider()
     st.markdown("### 🔧 Filtres")
-    search   = st.text_input("🔍 Recherche", placeholder="Bordeaux, Guigal…")
-    price_max = st.slider("💶 Prix max (€)", 0, 200, 200, step=5)
+    search = st.text_input("🔍 Recherche", placeholder="Bordeaux, Guigal…")
+
+    # ⑤ Range slider prix
+    price_range = st.slider("💶 Prix (€)", 0, 200, (0, 200), step=5)
+
     rating_min = st.select_slider("⭐ Note min",
-        options=[0.0, 3.0, 3.5, 3.8, 4.0, 4.2, 4.5], value=0.0,
-        format_func=lambda x: "Toutes" if x == 0 else f"≥ {x} ★")
+        options=[0.0,3.0,3.5,3.8,4.0,4.2,4.5], value=0.0,
+        format_func=lambda x: "Toutes" if x==0 else f"≥ {x} ★")
+
+    # ③ Filtre région
+    all_regions_cache = sorted({extract_region(w["name"]) for w in lc["wines"]
+                                 if extract_region(w["name"])}) if lc else []
+    regions_filter = st.multiselect("🗺️ Région", all_regions_cache, placeholder="Toutes les régions")
+
     only_vintage = st.checkbox("✅ Millésime confirmé", False)
     only_dispo   = st.checkbox("🏪 Dispos à Blagnac", True)
 
 # ── CHARGEMENT / SCRAPING ─────────────────────────────────────────────────
-# Changement de type de vin → reset
 if slug != st.session_state.loaded_slug:
-    st.session_state.wines     = []
-    st.session_state.data_ready = False
+    st.session_state.wines = []; st.session_state.data_ready = False
 
-# Premier chargement sans bouton : essayer le cache disque silencieusement
-if not st.session_state.data_ready and not btn_stock and not btn_vivino:
+if not st.session_state.data_ready and not btn_stock and not btn_vivino \
+        and not btn_fill and not btn_resume:
     cached = load_wines_from_cache(slug)
     if cached:
-        st.session_state.wines      = cached
-        st.session_state.loaded_slug = slug
-        st.session_state.data_ready  = True
+        st.session_state.wines = cached; st.session_state.loaded_slug = slug
+        st.session_state.data_ready = True
 
-# Bouton "Vérifier disponibilité"
 if btn_stock:
-    st.session_state.wines = []
-    st.session_state.data_ready = False
+    st.session_state.wines = []; st.session_state.data_ready = False
     with st.status("🔄 Vérification du stock…", expanded=True) as status:
-        logs, log_box = [], st.empty()
-        def log(msg): logs.append(msg); log_box.markdown("\n\n".join(logs[-10:]))
+        log, _ = _make_logger(10)
         try:
             raw = run_check_stock(slug, log=log)
         except Exception as e:
-            st.error(f"❌ Erreur Selenium : {e}\n\n"
-                     "Vérifiez `packages.txt` :\n```\nchromium\nchromium-driver\n```")
+            st.error(f"❌ Erreur Selenium : {e}\n\nVérifiez `packages.txt` :\n```\nchromium\nchromium-driver\n```")
             st.stop()
-        n_dispo  = sum(1 for w in raw if w.get("available", True))
-        n_rated  = sum(1 for w in raw if w.get("rating"))
-        st.session_state.wines       = raw
-        st.session_state.loaded_slug = slug
-        st.session_state.data_ready  = True
+        n_dispo = sum(1 for w in raw if w.get("available",True))
+        n_rated = sum(1 for w in raw if w.get("rating"))
+        st.session_state.wines = raw; st.session_state.loaded_slug = slug
+        st.session_state.data_ready = True
         status.update(label=f"✅ {n_dispo} vins dispo · {n_rated} notes Vivino", state="complete")
 
-# Bouton "Rafraîchir Vivino"
 if btn_vivino:
-    st.session_state.wines = []
-    st.session_state.data_ready = False
-    with st.status("🍷 Scraping Vivino…", expanded=True) as status:
-        logs, log_box = [], st.empty()
-        def log(msg): logs.append(msg); log_box.markdown("\n\n".join(logs[-10:]))
+    ckpt_finish(slug)
+    st.session_state.wines = []; st.session_state.data_ready = False
+    with st.status("🍷 Scraping Vivino (complet)…", expanded=True) as status:
+        log, _ = _make_logger(12)
         try:
-            raw = run_refresh_vivino(slug, log=log)
+            raw = run_refresh_vivino(slug, resume=False, log=log)
         except Exception as e:
-            st.error(f"❌ Erreur Selenium : {e}")
-            st.stop()
+            st.error(f"❌ Erreur Selenium : {e}"); st.stop()
         n_rated  = sum(1 for w in raw if w.get("rating"))
         n_counts = sum(1 for w in raw if (w.get("ratings_count") or 0) > 0)
-        st.session_state.wines       = raw
-        st.session_state.loaded_slug = slug
-        st.session_state.data_ready  = True
-        status.update(
-            label=f"✅ {n_rated} notes Vivino · {n_counts} nb avis",
-            state="complete")
+        st.session_state.wines = raw; st.session_state.loaded_slug = slug
+        st.session_state.data_ready = True
+        status.update(label=f"✅ {n_rated} notes · {n_counts} nb avis", state="complete")
+
+if btn_fill:
+    st.session_state.wines = []; st.session_state.data_ready = False
+    with st.status("🔎 Complétion des données manquantes…", expanded=True) as status:
+        log, _ = _make_logger(12)
+        try:
+            raw = run_fill_missing_vivino(slug, log=log)
+        except Exception as e:
+            st.error(f"❌ Erreur Selenium : {e}"); st.stop()
+        n_rated = sum(1 for w in raw if w.get("rating"))
+        st.session_state.wines = raw; st.session_state.loaded_slug = slug
+        st.session_state.data_ready = True
+        status.update(label=f"✅ {n_rated} vins notés au total", state="complete")
+
+if btn_resume:
+    st.session_state.wines = []; st.session_state.data_ready = False
+    with st.status("▶️ Reprise du scraping Vivino…", expanded=True) as status:
+        log, _ = _make_logger(12)
+        try:
+            raw = run_refresh_vivino(slug, resume=True, log=log)
+        except Exception as e:
+            st.error(f"❌ Erreur Selenium : {e}"); st.stop()
+        n_rated  = sum(1 for w in raw if w.get("rating"))
+        n_counts = sum(1 for w in raw if (w.get("ratings_count") or 0) > 0)
+        st.session_state.wines = raw; st.session_state.loaded_slug = slug
+        st.session_state.data_ready = True
+        status.update(label=f"✅ {n_rated} notes · {n_counts} nb avis", state="complete")
 
 wines = st.session_state.wines
 if not wines:
@@ -804,25 +993,22 @@ if not wines:
 
 # ── FILTRE ────────────────────────────────────────────────────────────────
 filtered = [w for w in wines
-    if (w.get("price") or 0) <= price_max
+    if price_range[0] <= (w.get("price") or 0) <= price_range[1]
     and (rating_min == 0 or (w.get("rating") and w["rating"] >= rating_min))
     and (not search or search.lower() in w["name"].lower())
     and (not only_vintage or w.get("vintage_match") is True)
-    and (not only_dispo or w.get("available", True))]
+    and (not only_dispo or w.get("available", True))
+    and (not regions_filter or w.get("region","") in regions_filter)]
 
-# ── TRI (pills radio inline) ──────────────────────────────────────────────
+# ── TRI ───────────────────────────────────────────────────────────────────
 SORTS = {
-    "★/€ Ratio":     lambda x: -(x.get("ratio") or 0),
-    "⭐ Note":        lambda x: -(x.get("rating") or 0),
-    "💶 Prix ↑":     lambda x:  x.get("price") or 999,
-    "💶 Prix ↓":     lambda x: -(x.get("price") or 0),
-    "💰 Moins cher": lambda x:  x.get("price") or 999,
+    "🏆 Score":   lambda x: -(x.get("score") or 0),
+    "⭐ Note":    lambda x: -(x.get("rating") or 0),
+    "💶 Prix ↑": lambda x:  x.get("price") or 999,
+    "💶 Prix ↓": lambda x: -(x.get("price") or 0),
 }
-
 sort_cols = st.columns(len(SORTS))
-if "sort_key" not in st.session_state:
-    st.session_state.sort_key = "★/€ Ratio"
-
+if "sort_key" not in st.session_state: st.session_state.sort_key = "🏆 Score"
 for col, (label, _) in zip(sort_cols, SORTS.items()):
     with col:
         active = st.session_state.sort_key == label
@@ -830,106 +1016,166 @@ for col, (label, _) in zip(sort_cols, SORTS.items()):
                      type="primary" if active else "secondary",
                      use_container_width=True):
             st.session_state.sort_key = label
-
-# Dédoublonner les labels similaires
-SORTS_CLEAN = {
-    "★/€ Ratio":     lambda x: -(x.get("ratio") or 0),
-    "⭐ Note":        lambda x: -(x.get("rating") or 0),
-    "💶 Prix ↑":     lambda x:  x.get("price") or 999,
-    "💶 Prix ↓":     lambda x: -(x.get("price") or 0),
-    "💰 Moins cher": lambda x:  x.get("price") or 999,
-}
-filtered.sort(key=SORTS_CLEAN.get(st.session_state.sort_key, SORTS_CLEAN["★/€ Ratio"]))
+filtered.sort(key=SORTS.get(st.session_state.sort_key, SORTS["🏆 Score"]))
 
 # ── ONGLETS ───────────────────────────────────────────────────────────────
-tab_rank, tab_data, tab_export = st.tabs(["🏅 Classement", "📊 Données & Cache", "📥 Export"])
+tab_rank, tab_deals, tab_data, tab_export = st.tabs(
+    ["🏅 Classement", "💡 Bonnes Affaires", "📊 Données & Cache", "📥 Export"])
 
 # ── CLASSEMENT ────────────────────────────────────────────────────────────
 with tab_rank:
-    c1, c2, c3, c4 = st.columns(4)
+    c1,c2,c3,c4,c5 = st.columns(5)
     prices = [w["price"] for w in filtered if w.get("price")]
     rated  = [w["rating"] for w in filtered if w.get("rating")]
-    best   = max(filtered, key=lambda x: x.get("ratio") or 0, default=None)
-    with c1: st.metric("🍷 Vins", len(filtered))
-    with c2: st.metric("💶 Prix moy.",
-        f"{sum(prices)/len(prices):.2f} €".replace(".", ",") if prices else "—")
-    with c3: st.metric("⭐ Note moy.",
-        f"★ {sum(rated)/len(rated):.2f}" if rated else "—")
-    with c4: st.metric("🏆 Top ratio",
-        f"{best['ratio']:.3f}" if best and best.get("ratio") else "—")
+    best   = max(filtered, key=lambda x: x.get("score") or 0, default=None)
+    n_rated_fil = sum(1 for w in filtered if w.get("rating"))
+    with c1: st.metric("🍷 Vins", f"{len(filtered)}" + (f"/{len(wines)}" if len(filtered)!=len(wines) else ""))
+    with c2: st.metric("💶 Prix moy.", f"{sum(prices)/len(prices):.2f} €".replace(".",",") if prices else "—")
+    with c3: st.metric("⭐ Note moy.", f"★ {sum(rated)/len(rated):.2f}" if rated else "—")
+    with c4: st.metric("🏆 Meilleur score", f"{best['score']:.2f}" if best and best.get("score") else "—")
+    with c5: st.metric("📊 Couverts Vivino", f"{n_rated_fil}/{len(filtered)}" if filtered else "—",
+                       delta=None if n_rated_fil==len(filtered) else f"{len(filtered)-n_rated_fil} sans note")
 
     n_bad = sum(1 for w in filtered if w.get("vintage_match") is False)
-    if n_bad:
-        st.warning(f"⚠️ {n_bad} vins avec millésime différent Leclerc / Vivino (bordure orange).")
-
+    if n_bad: st.warning(f"⚠️ {n_bad} vins avec millésime différent Leclerc / Vivino (bordure orange).")
     st.divider()
     if not filtered:
         st.info("Aucun vin ne correspond aux filtres.")
     else:
-        max_ratio = max((w.get("ratio") or 0 for w in filtered), default=1)
+        max_score = max((w.get("score") or 0 for w in filtered), default=1)
         for i, w in enumerate(filtered):
-            st.markdown(wine_card_html(w, i + 1, max_ratio), unsafe_allow_html=True)
+            st.markdown(wine_card_html(w, i+1, max_score), unsafe_allow_html=True)
+
+# ── BONNES AFFAIRES  ⑧ ──────────────────────────────────────────────────
+with tab_deals:
+    st.markdown("#### 💡 Bonnes Affaires")
+    st.caption("Critères : note ≥ 4.0 · prix ≤ 15 € · ≥ 500 avis · disponible")
+
+    deals = sorted(
+        [w for w in wines if (w.get("rating") or 0) >= 4.0
+                          and (w.get("price") or 999) <= 15
+                          and (w.get("ratings_count") or 0) >= 500
+                          and w.get("available", True)],
+        key=lambda x: -(x.get("score") or 0))
+
+    if not deals:
+        deals_soft = sorted(
+            [w for w in wines if (w.get("rating") or 0) >= 3.8
+                              and (w.get("price") or 999) <= 20
+                              and (w.get("ratings_count") or 0) >= 100
+                              and w.get("available", True)],
+            key=lambda x: -(x.get("score") or 0))
+        if deals_soft:
+            st.info("Aucun vin ne remplit les critères stricts. Résultats assouplis : ≥ 3.8★ · ≤ 20€ · ≥ 100 avis.")
+            deals = deals_soft[:20]
+        else:
+            st.info("Aucune bonne affaire identifiée. Lancez **🔎 Compléter les manquants** pour enrichir les données.")
+    else:
+        st.success(f"🎉 {len(deals)} bonne(s) affaire(s) !")
+
+    for w in deals[:30]:
+        score = w.get("score") or 0
+        trend = w.get("price_trend","")
+        trend_h = {"↑":'<span class="p-up">↑</span>',"↓":'<span class="p-down">↓</span>',
+                   "=":'<span class="p-eq">=</span>'}.get(trend,"")
+        url_lec = f'<a href="{w["url"]}" target="_blank" class="lnk lnk-lec">🛒 Leclerc</a>' if w.get("url") else ""
+        url_viv = f'<a href="{w["vivino_url"]}" target="_blank" class="lnk lnk-viv">🍷 Vivino</a>' if w.get("vivino_url") else ""
+        region  = w.get("region","")
+        st.markdown(f"""
+<div class="deal-card">
+  <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
+    <div style="text-align:center;min-width:52px">
+      <div class="deal-score">{score:.2f}</div>
+      <div class="deal-label">score</div>
+    </div>
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:700;font-size:.95rem;color:#1A0810;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{w["name"]}</div>
+      <div style="font-size:.75rem;color:#8B6B72;margin-top:.15rem">
+        {'🗺️ '+region+' · ' if region else ''}★ {w.get("rating",0):.1f}
+        · {fmt_count(w.get("ratings_count",0))} avis
+        · <strong>{(w.get("price") or 0):.2f} €</strong>{trend_h}
+      </div>
+      <div class="wine-links" style="margin-top:.3rem">{url_lec}{url_viv}</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
 
 # ── DONNÉES ───────────────────────────────────────────────────────────────
 with tab_data:
-    st.markdown("#### Tous les vins")
+    st.markdown("#### Tous les vins chargés")
     df_w = pd.DataFrame([{
         "Nom":         w["name"],
+        "Région":      w.get("region",""),
         "Millésime":   w.get("vintage") or "",
         "Prix (€)":    w.get("price") or 0,
+        "Tendance":    w.get("price_trend",""),
         "Note":        w.get("rating") or "",
         "Nb avis":     w.get("ratings_count") or "",
-        "Ratio":       w.get("ratio") or "",
-        "Dispo":       "✅" if w.get("available", True) else "⛔",
-        "Mil. OK":     {True:"✅", False:"⚠️", None:"—"}.get(w.get("vintage_match"), "—"),
+        "Score":       w.get("score") or "",
+        "Dispo":       "✅" if w.get("available",True) else "⛔",
+        "Mil. OK":     {True:"✅",False:"⚠️",None:"—"}.get(w.get("vintage_match"),"—"),
         "Leclerc":     w.get("url") or "",
         "Vivino":      w.get("vivino_url") or "",
         "Query":       build_query(w["name"]),
     } for w in wines])
     st.dataframe(df_w, use_container_width=True, hide_index=True, height=450,
         column_config={
-            "Leclerc": st.column_config.LinkColumn(display_text="🛒"),
-            "Vivino":  st.column_config.LinkColumn(display_text="🍷"),
-            "Prix (€)":st.column_config.NumberColumn(format="%.2f"),
-            "Note":    st.column_config.NumberColumn(format="%.1f"),
-            "Ratio":   st.column_config.NumberColumn(format="%.3f"),
+            "Leclerc":  st.column_config.LinkColumn(display_text="🛒"),
+            "Vivino":   st.column_config.LinkColumn(display_text="🍷"),
+            "Prix (€)": st.column_config.NumberColumn(format="%.2f"),
+            "Note":     st.column_config.NumberColumn(format="%.1f"),
+            "Score":    st.column_config.NumberColumn(format="%.2f"),
         })
 
     st.divider()
     st.markdown("#### 🗂️ Cache Vivino")
     vc_now = load_vivino_cache()
-    n_ok  = sum(1 for v in vc_now.values() if v.get("rating"))
-    n_av  = sum(1 for v in vc_now.values() if (v.get("ratings_count") or 0) > 0)
+    n_ok   = sum(1 for v in vc_now.values() if v.get("rating"))
+    n_av   = sum(1 for v in vc_now.values() if (v.get("ratings_count") or 0)>0)
     n_url2 = sum(1 for v in vc_now.values() if v.get("vivino_url"))
     st.caption(f"{len(vc_now)} entrées · {n_ok} notes · {n_av} nb avis · {n_url2} URLs")
     df_c = pd.DataFrame([{
-        "Query":    k,
-        "Note":     v.get("rating") or "",
-        "Nb avis":  v.get("ratings_count") or "",
-        "Vivino":   v.get("vivino_url") or "",
-        "Millésime":v.get("vivino_year") or "",
-        "Màj":      fmt_age(v.get("cached_at", 0)),
+        "Query":     k,
+        "Note":      v.get("rating") or "",
+        "Nb avis":   v.get("ratings_count") or "",
+        "Vivino":    v.get("vivino_url") or "",
+        "Millésime": v.get("vivino_year") or "",
+        "Màj":       fmt_age(v.get("cached_at",0)),
     } for k, v in vc_now.items()])
     st.dataframe(df_c, use_container_width=True, hide_index=True, height=400,
-        column_config={
-            "Vivino": st.column_config.LinkColumn(display_text="🍷"),
-            "Note":   st.column_config.NumberColumn(format="%.1f"),
-        })
+        column_config={"Vivino":st.column_config.LinkColumn(display_text="🍷"),
+                       "Note":  st.column_config.NumberColumn(format="%.1f")})
+
+    ph = load_price_history()
+    if ph:
+        st.divider()
+        st.markdown("#### 📈 Historique des prix  ⑨")
+        rows = []
+        for ean, entry in ph.items():
+            for rec in entry.get("history",[]):
+                rows.append({"EAN":ean,"Nom":entry.get("name","")[:40],
+                             "Date":rec["date"],"Prix (€)":rec["price"]})
+        if rows:
+            df_ph = pd.DataFrame(rows).sort_values(["Nom","Date"])
+            st.dataframe(df_ph, use_container_width=True, hide_index=True, height=300,
+                column_config={"Prix (€)":st.column_config.NumberColumn(format="%.2f")})
 
 # ── EXPORT ────────────────────────────────────────────────────────────────
 with tab_export:
     def make_df(ws):
         return pd.DataFrame([{
             "Nom":              w["name"],
+            "Région":           w.get("region",""),
             "Millésime":        w.get("vintage") or "",
             "Prix (€)":         w.get("price") or 0,
+            "Tendance prix":    w.get("price_trend",""),
             "EAN":              w.get("ean") or "",
             "Note Vivino":      w.get("rating") or "",
             "Nb avis":          w.get("ratings_count") or "",
+            "Score":            w.get("score") or "",
             "Millésime Vivino": w.get("vivino_year") or "",
             "Millésime OK":     w.get("vintage_match") or "",
-            "Ratio ★/€":        w.get("ratio") or "",
-            "Disponible":       w.get("available", True),
+            "Disponible":       w.get("available",True),
             "URL Leclerc":      w.get("url") or "",
             "URL Vivino":       w.get("vivino_url") or "",
         } for w in ws])
