@@ -20,6 +20,7 @@ MAX_PAGES             = 15
 LECLERC_CACHE_TTL     = 12 * 3600
 LECLERC_PAGE_SIZE     = 96
 VIVINO_SIMILARITY_MIN = 0.28   # ⑦ seuil pertinence
+VIVINO_CANDIDATES_MAX = 8
 
 CACHE_DIR = Path(__file__).parent / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
@@ -304,6 +305,14 @@ def extract_region(wine_name: str) -> str:
 # _MERGE_VIVINO — source de vérité unique  ④
 # ═══════════════════════════════════════════════════════════════════════════
 
+
+def vivino_cache_type(entry: dict) -> str:
+    if entry.get("suppressed"):
+        return "masqué"
+    if entry.get("manual_override"):
+        return "manuel"
+    return "auto"
+
 def _merge_vivino(wines: list, vc: dict, ph: dict | None = None) -> list:
     """Injecte données Vivino + calcule score/région/tendance prix."""
     if ph is None: ph = {}
@@ -311,9 +320,19 @@ def _merge_vivino(wines: list, vc: dict, ph: dict | None = None) -> list:
         key = build_query(w["name"])
         cv  = vc.get(key, {})
         w.setdefault("available", True)
-        if cv.get("rating") is not None or cv.get("vivino_url"):
-            for k, v in cv.items():
-                if k != "cached_at": w[k] = v
+        if cv.get("suppressed"):
+            w["rating"] = None
+            w["ratings_count"] = 0
+            w["vivino_url"] = ""
+            w["vivino_year"] = None
+            w["vintage_match"] = None
+        elif cv.get("rating") is not None or cv.get("vivino_url"):
+            w["rating"] = cv.get("rating")
+            w["ratings_count"] = cv.get("ratings_count", 0)
+            w["vivino_url"] = cv.get("vivino_url", "")
+            w["vivino_year"] = cv.get("vivino_year")
+            w["vintage_match"] = cv.get("vintage_match")
+            w["match_confidence"] = cv.get("match_confidence")
         w.setdefault("rating", None);      w.setdefault("ratings_count", 0)
         w.setdefault("vivino_url", "");    w.setdefault("vivino_year", None)
         w.setdefault("vintage_match", None)
@@ -420,16 +439,55 @@ def _name_similarity(name1: str, name2: str) -> float:
     if not w1 or not w2: return 0.0
     return len(w1 & w2) / min(len(w1), len(w2))
 
-def vivino_url_from_search(html: str) -> tuple:
-    """Retourne (url, title) du 1er résultat Vivino ou (None, '')."""
+def _extract_year(text: str) -> int | None:
+    m = re.search(r"\b(19|20)\d{2}\b", text or "")
+    return int(m.group(0)) if m else None
+
+
+def vivino_candidates_from_search(html: str, max_candidates: int = VIVINO_CANDIDATES_MAX) -> list[dict]:
+    """Retourne plusieurs candidats Vivino avec URL+titre depuis la page de recherche."""
     soup = BeautifulSoup(html, "html.parser")
+    out, seen = [], set()
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        if re.search(r"/w/\d+", href) and "search" not in href:
-            url   = href if href.startswith("http") else f"https://www.vivino.com{href}"
-            title = a.get_text(separator=" ", strip=True)
-            return url, title
-    return None, ""
+        if not re.search(r"/w/\d+", href) or "search" in href:
+            continue
+        url = href if href.startswith("http") else f"https://www.vivino.com{href}"
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append({
+            "url": url,
+            "title": a.get_text(separator=" ", strip=True),
+            "year": _extract_year(a.get_text(separator=" ", strip=True)),
+        })
+        if len(out) >= max_candidates:
+            break
+    return out
+
+
+def choose_best_vivino_candidate(query: str, vintage, candidates: list[dict]) -> tuple[dict | None, float]:
+    """Choisit le meilleur candidat en combinant similarité nom + cohérence millésime."""
+    best, best_score = None, -1.0
+    for c in candidates:
+        score = _name_similarity(query, c.get("title", ""))
+        c_year = c.get("year")
+        if vintage and c_year:
+            if c_year == vintage:
+                score += 0.20
+            elif abs(c_year - vintage) == 1:
+                score += 0.08
+            else:
+                score -= 0.12
+        elif vintage and not c_year:
+            score -= 0.03
+
+        if score > best_score:
+            best, best_score = c, score
+
+    if not best or best_score < VIVINO_SIMILARITY_MIN:
+        return None, best_score
+    return best, best_score
 
 def parse_wine_jsonld(html: str) -> dict:
     rating, count = None, 0
@@ -572,12 +630,13 @@ def check_availability(slug: str, cached_wines: list, log=None) -> list:
 
 
 def fetch_vivino(driver, wine_name: str, vintage) -> dict:
-    """⑦ 2 navigations avec vérification de pertinence du 1er résultat."""
+    """⑦ 2 navigations avec choix du meilleur candidat (nom + millésime)."""
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     EMPTY = {"rating": None, "ratings_count": 0,
-             "vivino_url": "", "vivino_year": None, "vintage_match": None}
+             "vivino_url": "", "vivino_year": None, "vintage_match": None,
+             "match_confidence": 0.0}
     query = build_query(wine_name)
     try:
         driver.get(f"https://www.vivino.com/search/wines"
@@ -588,14 +647,18 @@ def fetch_vivino(driver, wine_name: str, vintage) -> dict:
                  "[class*='wineCard'],[class*='wine-card'],[class*='averageValue'],[href*='/w/']")))
         except Exception: pass
         time.sleep(1)
-        wine_url, vivino_title = vivino_url_from_search(driver.page_source)
+        candidates = vivino_candidates_from_search(driver.page_source)
+        best, confidence = choose_best_vivino_candidate(query, vintage, candidates)
     except Exception:
         return EMPTY
+
+    if not best:
+        return EMPTY
+
+    wine_url = best.get("url", "")
     if not wine_url:
         return EMPTY
-    # ⑦ Vérification pertinence
-    if vivino_title and _name_similarity(query, vivino_title) < VIVINO_SIMILARITY_MIN:
-        return EMPTY
+
     try:
         driver.get(wine_url)
         try: WebDriverWait(driver, 9).until(
@@ -606,17 +669,27 @@ def fetch_vivino(driver, wine_name: str, vintage) -> dict:
         d = parse_wine_jsonld(driver.page_source)
     except Exception:
         return EMPTY
+
     vy = None
-    m  = re.search(r"[?&]year=(\d{4})", driver.current_url)
-    if m: vy = int(m.group(1))
+    m = re.search(r"[?&]year=(\d{4})", driver.current_url)
+    if m:
+        vy = int(m.group(1))
+    elif best.get("year"):
+        vy = best.get("year")
+
     vmatch = None
-    if vintage and vy: vmatch = (vintage == vy)
-    elif not vintage:  vmatch = True
+    if vintage and vy:
+        vmatch = (vintage == vy)
+    elif not vintage:
+        vmatch = True
+
     if not d.get("rating"):
         return {"rating": None, "ratings_count": 0,
-                "vivino_url": wine_url, "vivino_year": vy, "vintage_match": vmatch}
+                "vivino_url": wine_url, "vivino_year": vy, "vintage_match": vmatch,
+                "match_confidence": round(confidence, 3)}
     return {"rating": d["rating"], "ratings_count": d["ratings_count"],
-            "vivino_url": wine_url, "vivino_year": vy, "vintage_match": vmatch}
+            "vivino_url": wine_url, "vivino_year": vy, "vintage_match": vmatch,
+            "match_confidence": round(confidence, 3)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -655,9 +728,19 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
     try:
         for wine in todo:
             ean = wine.get("ean") or build_query(wine["name"])
-            vd  = fetch_vivino(driver, wine["name"], wine.get("vintage"))
             key = build_query(wine["name"])
-            vc[key] = {**vd, "cached_at": now}
+            if vc.get(key, {}).get("locked"):
+                done_count += 1
+                if log: log(f"  🔒 [{done_count}/{len(wines)}] {wine['name'][:38]} (correction manuelle conservée)")
+                continue
+            vd  = fetch_vivino(driver, wine["name"], wine.get("vintage"))
+            vc[key] = {
+                **vd,
+                "cached_at": now,
+                "locked": False,
+                "manual_override": False,
+                "suppressed": False,
+            }
             save_vivino_cache(vc)
             ckpt_tick(slug, ean)
             done_count += 1
@@ -727,7 +810,8 @@ def run_fill_missing_vivino(slug: str, log=None) -> list:
     wines = lc["wines"]
     for w in wines: w.setdefault("available", True)
     missing = [w for w in wines
-               if not vc.get(build_query(w["name"]), {}).get("rating")
+               if not vc.get(build_query(w["name"]), {}).get("locked")
+               and not vc.get(build_query(w["name"]), {}).get("rating")
                and not vc.get(build_query(w["name"]), {}).get("vivino_url")]
     if not missing:
         if log: log("✅ Tous les vins ont déjà une note ou un lien Vivino !")
@@ -1140,11 +1224,81 @@ with tab_data:
         "Nb avis":   v.get("ratings_count") or "",
         "Vivino":    v.get("vivino_url") or "",
         "Millésime": v.get("vivino_year") or "",
+        "Confiance": v.get("match_confidence") or "",
+        "Type":      vivino_cache_type(v),
+        "🔒":        "🔒" if v.get("locked") else "",
         "Màj":       fmt_age(v.get("cached_at",0)),
     } for k, v in vc_now.items()])
     st.dataframe(df_c, use_container_width=True, hide_index=True, height=400,
         column_config={"Vivino":st.column_config.LinkColumn(display_text="🍷"),
                        "Note":  st.column_config.NumberColumn(format="%.1f")})
+
+    st.divider()
+    st.markdown("#### 🛠️ Correction manuelle Vivino")
+    names = sorted({w["name"] for w in wines})
+    if names:
+        selected_name = st.selectbox("Vin à corriger", names, key="manual_vivino_name")
+        manual_key = build_query(selected_name)
+        current = vc_now.get(manual_key, {})
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            rating_input = st.text_input("Note (0-5)", value="" if current.get("rating") is None else str(current.get("rating")), key="manual_rating")
+        with c2:
+            ratings_count_input = st.number_input("Nb avis", min_value=0, step=1, value=int(current.get("ratings_count") or 0), key="manual_count")
+        with c3:
+            year_input = st.text_input("Millésime Vivino", value="" if current.get("vivino_year") is None else str(current.get("vivino_year")), key="manual_year")
+
+        url_input = st.text_input("URL Vivino", value=current.get("vivino_url", ""), key="manual_url")
+        col_a, col_b, col_c = st.columns(3)
+
+        if col_a.button("💾 Enregistrer correction", use_container_width=True):
+            try:
+                rating_val = None if not rating_input.strip() else float(str(rating_input).replace(",", "."))
+                if rating_val is not None and not (0 <= rating_val <= 5):
+                    raise ValueError("La note doit être entre 0 et 5")
+                year_val = None if not year_input.strip() else int(year_input)
+                vc_now[manual_key] = {
+                    "rating": rating_val,
+                    "ratings_count": int(ratings_count_input or 0),
+                    "vivino_url": (url_input or "").strip(),
+                    "vivino_year": year_val,
+                    "vintage_match": None,
+                    "manual_override": True,
+                    "suppressed": False,
+                    "locked": True,
+                    "cached_at": time.time(),
+                }
+                save_vivino_cache(vc_now)
+                st.success("Correction enregistrée (entrée verrouillée).")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Valeur invalide: {e}")
+
+        if col_b.button("🧹 Supprimer info Vivino", use_container_width=True):
+            vc_now[manual_key] = {
+                "rating": None,
+                "ratings_count": 0,
+                "vivino_url": "",
+                "vivino_year": None,
+                "vintage_match": None,
+                "manual_override": True,
+                "suppressed": True,
+                "locked": True,
+                "cached_at": time.time(),
+            }
+            save_vivino_cache(vc_now)
+            st.success("Info Vivino supprimée et verrouillée (ne sera plus auto-remplie).")
+            st.rerun()
+
+        if col_c.button("🔓 Déverrouiller", use_container_width=True):
+            if manual_key in vc_now:
+                vc_now[manual_key]["locked"] = False
+                vc_now[manual_key]["suppressed"] = False
+                vc_now[manual_key]["manual_override"] = False
+                save_vivino_cache(vc_now)
+            st.success("Entrée déverrouillée. Les prochains refresh Vivino pourront la recalculer.")
+            st.rerun()
 
     ph = load_price_history()
     if ph:
