@@ -4,7 +4,7 @@ Améliorations : score composite, bonnes affaires, régions, historique prix,
                 filtre range prix, couverture Vivino, pertinence Vivino, _merge_vivino.
 """
 
-import re, json, time, math, unicodedata
+import re, json, time, math, unicodedata, threading
 import streamlit as st
 import requests
 import pandas as pd
@@ -21,9 +21,19 @@ LECLERC_CACHE_TTL     = 12 * 3600
 LECLERC_PAGE_SIZE     = 96
 VIVINO_SIMILARITY_MIN = 0.28   # ⑦ seuil pertinence
 VIVINO_CANDIDATES_MAX = 8
+VIVINO_API_TIMEOUT = 8
+
+VIVINO_API_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "fr-FR,fr;q=0.9",
+    "Referer": "https://www.vivino.com/",
+}
 
 CACHE_DIR = Path(__file__).parent / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
+JOB_STATE_PATH = CACHE_DIR / "job_state.json"
 
 WINE_TYPES = {
     "🔴 Rouge":    "vins-rouges",
@@ -231,6 +241,76 @@ def ckpt_tick(slug: str, ean: str) -> None:
 def ckpt_finish(slug: str) -> None:
     _ckpt_path(slug).unlink(missing_ok=True)
     _ckpt_path(slug).with_suffix(".tmp").unlink(missing_ok=True)
+
+
+_job_lock = threading.Lock()
+_job_thread = None
+
+
+def load_job_state() -> dict:
+    if JOB_STATE_PATH.exists():
+        try:
+            return json.loads(JOB_STATE_PATH.read_text("utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_job_state(state: dict) -> None:
+    tmp = JOB_STATE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
+    tmp.replace(JOB_STATE_PATH)
+
+
+def _set_job_state(**kwargs) -> None:
+    with _job_lock:
+        state = load_job_state()
+        state.update(kwargs)
+        state["updated_at"] = time.time()
+        save_job_state(state)
+
+
+def _background_job(slug: str, mode: str) -> None:
+    _set_job_state(status="running", slug=slug, mode=mode, message="Démarrage…", error="")
+
+    def _log(msg: str):
+        _set_job_state(message=msg)
+
+    try:
+        if mode == "refresh_all":
+            raw = run_refresh_vivino(slug, resume=False, log=_log)
+        elif mode == "fill_missing":
+            raw = run_fill_missing_vivino(slug, log=_log)
+        elif mode == "resume":
+            raw = run_refresh_vivino(slug, resume=True, log=_log)
+        else:
+            raise ValueError(f"Mode inconnu: {mode}")
+
+        n_rated = sum(1 for w in raw if w.get("rating"))
+        _set_job_state(status="done", message=f"✅ Terminé · {n_rated} vins notés", finished_at=time.time())
+    except Exception as e:
+        _set_job_state(status="error", error=str(e), message=f"❌ {e}", finished_at=time.time())
+
+
+def start_background_job(slug: str, mode: str) -> bool:
+    global _job_thread
+    with _job_lock:
+        current = load_job_state()
+        if current.get("status") == "running":
+            return False
+        save_job_state({
+            "status": "queued",
+            "slug": slug,
+            "mode": mode,
+            "started_at": time.time(),
+            "message": "Mise en file…",
+            "error": "",
+            "updated_at": time.time(),
+        })
+
+    _job_thread = threading.Thread(target=_background_job, args=(slug, mode), daemon=True)
+    _job_thread.start()
+    return True
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -527,6 +607,66 @@ def choose_best_vivino_candidate(query: str, vintage, candidates: list[dict]) ->
         return None, best_score
     return best, best_score
 
+
+def fetch_vivino_via_api(query: str, vintage) -> dict | None:
+    """Fallback API Vivino quand le HTML scraping échoue."""
+    try:
+        resp = requests.get(
+            "https://www.vivino.com/api/explore/explore",
+            params={
+                "language": "fr",
+                "country_codes[]": "fr",
+                "price_range_max": 300,
+                "price_range_min": 0,
+                "wine_type_ids[]": 1,
+                "q": query,
+                "order_by": "match",
+            },
+            headers=VIVINO_API_HEADERS,
+            timeout=VIVINO_API_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            return None
+
+        records = (resp.json().get("explore_vintage", {}) or {}).get("records", [])
+        candidates = []
+        for r in records[:VIVINO_CANDIDATES_MAX]:
+            vintage_obj = r.get("vintage", {}) or {}
+            wine_obj = vintage_obj.get("wine", {}) or {}
+            title = f"{wine_obj.get('name','')} {vintage_obj.get('name','')}".strip()
+            candidates.append({
+                "title": title,
+                "year": vintage_obj.get("year"),
+                "record": r,
+            })
+
+        best, confidence = choose_best_vivino_candidate(query, vintage, candidates)
+        if not best:
+            return None
+
+        picked = best.get("record", {})
+        vintage_obj = picked.get("vintage", {}) or {}
+        wine_obj = vintage_obj.get("wine", {}) or {}
+        stats = vintage_obj.get("statistics", wine_obj.get("statistics", {})) or {}
+        vy = vintage_obj.get("year")
+
+        vmatch = None
+        if vintage and vy:
+            vmatch = (vintage == vy)
+        elif not vintage:
+            vmatch = True
+
+        return {
+            "rating": stats.get("ratings_average"),
+            "ratings_count": int(stats.get("ratings_count") or 0),
+            "vivino_url": f"https://www.vivino.com{wine_obj.get('seo_name','')}",
+            "vivino_year": vy,
+            "vintage_match": vmatch,
+            "match_confidence": round(confidence, 3),
+        }
+    except Exception:
+        return None
+
 def parse_wine_jsonld(html: str) -> dict:
     rating, count = None, 0
     soup = BeautifulSoup(html, "html.parser")
@@ -676,6 +816,11 @@ def fetch_vivino(driver, wine_name: str, vintage) -> dict:
              "vivino_url": "", "vivino_year": None, "vintage_match": None,
              "match_confidence": 0.0}
     query = build_query(wine_name)
+
+    api_data = fetch_vivino_via_api(query, vintage)
+    if api_data and (api_data.get("rating") or api_data.get("vivino_url")):
+        return api_data
+
     try:
         driver.get(f"https://www.vivino.com/search/wines"
                    f"?q={requests.utils.quote(query)}&language=fr")
@@ -691,7 +836,8 @@ def fetch_vivino(driver, wine_name: str, vintage) -> dict:
         return EMPTY
 
     if not best:
-        return EMPTY
+        fallback = fetch_vivino_via_api(query, vintage)
+        return fallback if fallback else EMPTY
 
     wine_url = best.get("url", "")
     if not wine_url:
@@ -997,13 +1143,13 @@ with st.sidebar:
 
     btn_stock  = st.button("🔄 Vérifier disponibilité", use_container_width=True, type="primary",
                            help="Vérifie les vins en rayon. Vivino depuis le cache.")
-    btn_vivino = st.button("🍷 Rafraîchir toutes les notes", use_container_width=True,
-                           help="Re-scrape Vivino intégral : ~3s/vin.")
+    btn_vivino = st.button("🍷 Rafraîchir toutes les notes (arrière-plan)", use_container_width=True,
+                           help="Lance le scraping Vivino en tâche de fond pour continuer à utiliser l'app.")
     btn_fill = False
     if n_missing > 0 and lc:
-        btn_fill = st.button(f"🔎 Compléter les manquants ({n_missing})",
+        btn_fill = st.button(f"🔎 Compléter les manquants ({n_missing}) (arrière-plan)",
                              use_container_width=True,
-                             help=f"Scrape uniquement les {n_missing} vins sans données Vivino.")
+                             help=f"Scrape uniquement les {n_missing} vins sans données Vivino en tâche de fond.")
 
     ckpt = ckpt_load(slug)
     btn_resume = False
@@ -1018,6 +1164,21 @@ with st.sidebar:
         with col_x:
             if st.button("✖ Annuler", use_container_width=True):
                 ckpt_finish(slug); st.rerun()
+
+    job = load_job_state()
+    auto_live = st.checkbox("🟢 Suivi temps réel (auto 5s)", value=True,
+                            help="Pendant un scraping en arrière-plan, met à jour l'interface automatiquement.")
+    if job.get("status") == "running" and job.get("slug") == slug:
+        st.info(
+            f"⏳ Job en cours ({job.get('mode')})\n\n"
+            f"{job.get('message','')}\n\n"
+            f"Màj: {fmt_age(job.get('updated_at',0))}",
+            icon=None,
+        )
+    elif job.get("status") == "done" and job.get("slug") == slug:
+        st.success(job.get("message", "✅ Job terminé"), icon=None)
+    elif job.get("status") == "error" and job.get("slug") == slug:
+        st.error(f"Job en erreur: {job.get('error','inconnue')}", icon=None)
 
     st.caption(f"📍 Leclerc Blagnac · magasin {STORE_CODE}")
     st.divider()
@@ -1067,45 +1228,40 @@ if btn_stock:
 
 if btn_vivino:
     ckpt_finish(slug)
-    st.session_state.wines = []; st.session_state.data_ready = False
-    with st.status("🍷 Scraping Vivino (complet)…", expanded=True) as status:
-        log, _ = _make_logger(12)
-        try:
-            raw = run_refresh_vivino(slug, resume=False, log=log)
-        except Exception as e:
-            st.error(f"❌ Erreur Selenium : {e}"); st.stop()
-        n_rated  = sum(1 for w in raw if w.get("rating"))
-        n_counts = sum(1 for w in raw if (w.get("ratings_count") or 0) > 0)
-        st.session_state.wines = raw; st.session_state.loaded_slug = slug
-        st.session_state.data_ready = True
-        status.update(label=f"✅ {n_rated} notes · {n_counts} nb avis", state="complete")
+    if start_background_job(slug, "refresh_all"):
+        st.success("Scraping Vivino lancé en arrière-plan.")
+    else:
+        st.warning("Un job est déjà en cours.")
 
 if btn_fill:
-    st.session_state.wines = []; st.session_state.data_ready = False
-    with st.status("🔎 Complétion des données manquantes…", expanded=True) as status:
-        log, _ = _make_logger(12)
-        try:
-            raw = run_fill_missing_vivino(slug, log=log)
-        except Exception as e:
-            st.error(f"❌ Erreur Selenium : {e}"); st.stop()
-        n_rated = sum(1 for w in raw if w.get("rating"))
-        st.session_state.wines = raw; st.session_state.loaded_slug = slug
-        st.session_state.data_ready = True
-        status.update(label=f"✅ {n_rated} vins notés au total", state="complete")
+    if start_background_job(slug, "fill_missing"):
+        st.success("Complétion des manquants lancée en arrière-plan.")
+    else:
+        st.warning("Un job est déjà en cours.")
 
 if btn_resume:
-    st.session_state.wines = []; st.session_state.data_ready = False
-    with st.status("▶️ Reprise du scraping Vivino…", expanded=True) as status:
-        log, _ = _make_logger(12)
-        try:
-            raw = run_refresh_vivino(slug, resume=True, log=log)
-        except Exception as e:
-            st.error(f"❌ Erreur Selenium : {e}"); st.stop()
-        n_rated  = sum(1 for w in raw if w.get("rating"))
-        n_counts = sum(1 for w in raw if (w.get("ratings_count") or 0) > 0)
-        st.session_state.wines = raw; st.session_state.loaded_slug = slug
+    if start_background_job(slug, "resume"):
+        st.success("Reprise du scraping lancée en arrière-plan.")
+    else:
+        st.warning("Un job est déjà en cours.")
+
+job_state = load_job_state()
+if job_state.get("status") in {"running", "queued"} and job_state.get("slug") == slug:
+    latest = load_wines_from_cache(slug)
+    if latest:
+        st.session_state.wines = latest
+        st.session_state.loaded_slug = slug
         st.session_state.data_ready = True
-        status.update(label=f"✅ {n_rated} notes · {n_counts} nb avis", state="complete")
+    if auto_live:
+        time.sleep(5)
+        st.rerun()
+
+if (job_state.get("status") == "done") and job_state.get("slug") == slug:
+    latest = load_wines_from_cache(slug)
+    if latest:
+        st.session_state.wines = latest
+        st.session_state.loaded_slug = slug
+        st.session_state.data_ready = True
 
 wines = st.session_state.wines
 if not wines:
