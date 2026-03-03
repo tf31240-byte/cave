@@ -142,11 +142,47 @@ def save_leclerc_cache(slug: str, wines: list) -> None:
         tmp.replace(p)
     except Exception: tmp.unlink(missing_ok=True); raise
 
+
+def _normalize_vivino_entry(entry: dict) -> dict:
+    """Normalise un enregistrement cache Vivino (compat anciennes versions)."""
+    if not isinstance(entry, dict):
+        return {
+            "rating": None,
+            "ratings_count": 0,
+            "vivino_url": "",
+            "vivino_year": None,
+            "vintage_match": None,
+            "match_confidence": None,
+            "manual_override": False,
+            "suppressed": False,
+            "locked": False,
+            "cached_at": 0,
+        }
+
+    out = dict(entry)
+    out.setdefault("rating", None)
+    out.setdefault("ratings_count", 0)
+    out.setdefault("vivino_url", "")
+    out.setdefault("vivino_year", None)
+    out.setdefault("vintage_match", None)
+    out.setdefault("match_confidence", None)
+    out.setdefault("manual_override", False)
+    out.setdefault("suppressed", False)
+    out.setdefault("locked", False)
+    out.setdefault("cached_at", 0)
+    return out
+
+
 def load_vivino_cache() -> dict:
     p = _viv_path()
     if p.exists():
-        try: return json.loads(p.read_text("utf-8"))
-        except Exception: pass
+        try:
+            raw = json.loads(p.read_text("utf-8"))
+            if not isinstance(raw, dict):
+                return {}
+            return {k: _normalize_vivino_entry(v) for k, v in raw.items()}
+        except Exception:
+            pass
     return {}
 
 def save_vivino_cache(cache: dict) -> None:
@@ -305,6 +341,14 @@ def extract_region(wine_name: str) -> str:
 # _MERGE_VIVINO — source de vérité unique  ④
 # ═══════════════════════════════════════════════════════════════════════════
 
+
+def vivino_cache_type(entry: dict) -> str:
+    if entry.get("suppressed"):
+        return "masqué"
+    if entry.get("manual_override"):
+        return "manuel"
+    return "auto"
+
 def _merge_vivino(wines: list, vc: dict, ph: dict | None = None) -> list:
     """Injecte données Vivino + calcule score/région/tendance prix."""
     if ph is None: ph = {}
@@ -318,12 +362,18 @@ def _merge_vivino(wines: list, vc: dict, ph: dict | None = None) -> list:
             w["vivino_url"] = ""
             w["vivino_year"] = None
             w["vintage_match"] = None
+            w["match_confidence"] = None
         elif cv.get("rating") is not None or cv.get("vivino_url"):
-            for k, v in cv.items():
-                if k != "cached_at": w[k] = v
+            w["rating"] = cv.get("rating")
+            w["ratings_count"] = cv.get("ratings_count", 0)
+            w["vivino_url"] = cv.get("vivino_url", "")
+            w["vivino_year"] = cv.get("vivino_year")
+            w["vintage_match"] = cv.get("vintage_match")
+            w["match_confidence"] = cv.get("match_confidence")
         w.setdefault("rating", None);      w.setdefault("ratings_count", 0)
         w.setdefault("vivino_url", "");    w.setdefault("vivino_year", None)
         w.setdefault("vintage_match", None)
+        w.setdefault("match_confidence", None)
         w["score"]       = compute_score(w.get("rating"), w.get("ratings_count"), w.get("price"))
         w["region"]      = extract_region(w["name"])
         w["price_trend"] = price_trend(w.get("ean",""), w.get("price") or 0, ph)
@@ -722,7 +772,13 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
                 if log: log(f"  🔒 [{done_count}/{len(wines)}] {wine['name'][:38]} (correction manuelle conservée)")
                 continue
             vd  = fetch_vivino(driver, wine["name"], wine.get("vintage"))
-            vc[key] = {**vd, "cached_at": now, "locked": False}
+            vc[key] = {
+                **vd,
+                "cached_at": now,
+                "locked": False,
+                "manual_override": False,
+                "suppressed": False,
+            }
             save_vivino_cache(vc)
             ckpt_tick(slug, ean)
             done_count += 1
@@ -1207,7 +1263,7 @@ with tab_data:
         "Vivino":    v.get("vivino_url") or "",
         "Millésime": v.get("vivino_year") or "",
         "Confiance": v.get("match_confidence") or "",
-        "Type":      "manuel" if v.get("manual_override") else ("masqué" if v.get("suppressed") else "auto"),
+        "Type":      vivino_cache_type(v),
         "🔒":        "🔒" if v.get("locked") else "",
         "Màj":       fmt_age(v.get("cached_at",0)),
     } for k, v in vc_now.items()])
@@ -1240,10 +1296,13 @@ with tab_data:
                 if rating_val is not None and not (0 <= rating_val <= 5):
                     raise ValueError("La note doit être entre 0 et 5")
                 year_val = None if not year_input.strip() else int(year_input)
+                url_val = (url_input or "").strip()
+                if rating_val is None and not url_val:
+                    raise ValueError("Renseignez au moins une note ou une URL Vivino (sinon utilisez 'Supprimer info Vivino').")
                 vc_now[manual_key] = {
                     "rating": rating_val,
                     "ratings_count": int(ratings_count_input or 0),
-                    "vivino_url": (url_input or "").strip(),
+                    "vivino_url": url_val,
                     "vivino_year": year_val,
                     "vintage_match": None,
                     "manual_override": True,
@@ -1277,6 +1336,7 @@ with tab_data:
             if manual_key in vc_now:
                 vc_now[manual_key]["locked"] = False
                 vc_now[manual_key]["suppressed"] = False
+                vc_now[manual_key]["manual_override"] = False
                 save_vivino_cache(vc_now)
             st.success("Entrée déverrouillée. Les prochains refresh Vivino pourront la recalculer.")
             st.rerun()
