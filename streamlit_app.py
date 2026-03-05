@@ -844,7 +844,7 @@ Utilisée quand la query principale ne retourne aucun candidat.
 
 ```
 Niveaux (la query complète q0 est déjà essayée en amont, exclue ici) :
-  1. Sans appellation  — partie avant le premier « - » du nom original
+  1. Sans appellation  — partie avant le premier " - " du nom original
   2. ASCII normalisé   — q0 sans accents (orthographes atypiques sur Vivino)
   3. 3 premiers mots   — réduit au nom de domaine + cuvée
   4. 2 premiers mots   — château / maison seul
