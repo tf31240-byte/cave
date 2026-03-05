@@ -2081,12 +2081,11 @@ with tab_stats:
             st.markdown("**Distribution des notes Vivino**")
             df_rat = df_s.dropna(subset=["Note"])
             if not df_rat.empty:
-                hist_data = pd.cut(df_rat["Note"],
+                cut_result = pd.cut(df_rat["Note"],
                                    bins=[2.5, 3.0, 3.3, 3.6, 3.9, 4.2, 4.5, 5.1],
-                                   labels=["2.5-3.0","3.0-3.3","3.3-3.6","3.6-3.9","3.9-4.2","4.2-4.5","4.5+"]
-                                   ).value_counts().reset_index()
-                hist_data.columns = ["Note", "Nb"]
-                hist_data = hist_data.sort_values("Note")
+                                   labels=["2.5-3.0","3.0-3.3","3.3-3.6","3.6-3.9","3.9-4.2","4.2-4.5","4.5+"])
+                counts = cut_result.value_counts().sort_index()
+                hist_data = pd.DataFrame({"Note": counts.index.astype(str), "Nb": counts.values})
                 chart_rat = (alt.Chart(hist_data)
                     .mark_bar(color="#C9A84C", cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
                     .encode(
@@ -2109,10 +2108,9 @@ with tab_stats:
                 step = 5 if price_max <= 50 else (10 if price_max <= 100 else 20)
                 bins = list(range(0, int(price_max) + step + 1, step))
                 labels = [f"{bins[i]}-{bins[i+1]}" for i in range(len(bins)-1)]
-                cut = pd.cut(df_pr["Prix"], bins=bins, labels=labels, right=False)
-                hist_p = cut.value_counts().reset_index()
-                hist_p.columns = ["Tranche", "Nb"]
-                hist_p = hist_p.sort_values("Tranche")
+                cut_p = pd.cut(df_pr["Prix"], bins=bins, labels=labels, right=False)
+                counts_p = cut_p.value_counts().sort_index()
+                hist_p = pd.DataFrame({"Tranche": counts_p.index.astype(str), "Nb": counts_p.values})
                 chart_pr = (alt.Chart(hist_p)
                     .mark_bar(color="#6B1A2A", cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
                     .encode(
@@ -2130,10 +2128,8 @@ with tab_stats:
         # Top régions
         with col_c:
             st.markdown("**Vins par région**")
-            top_reg = (df_s["Région"].value_counts().head(10)
-                       .reset_index().rename(columns={"index":"Région","Région":"Nb","count":"Nb"}))
-            if "Nb" not in top_reg.columns:
-                top_reg.columns = ["Région", "Nb"]
+            reg_counts = df_s["Région"].value_counts().head(10)
+            top_reg = pd.DataFrame({"Région": reg_counts.index, "Nb": reg_counts.values})
             chart_reg = (alt.Chart(top_reg)
                 .mark_bar(color="#2563eb", cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
                 .encode(
