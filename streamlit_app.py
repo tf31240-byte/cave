@@ -1619,13 +1619,13 @@ if lc:
                         if vc.get(build_query(w["name"]), {}).get("rating"))
         n_missing = n_total - n_rated
     cov_pct = int(100 * n_rated / max(n_total, 1))
-    st.caption(f"📦 **Leclerc** : {fmt_age(lc['cached_at'])} · {n_total} vins")
-    st.caption(f"🍷 **Vivino** : {n_rated}/{n_total} ({cov_pct}%)"
+    st.caption(f"📦 __Leclerc__ : {fmt_age(lc['cached_at'])} · {n_total} vins")
+    st.caption(f"🍷 __Vivino__ : {n_rated}/{n_total} ({cov_pct}%)"
                + (f" · ⚠️ {n_missing} manquants" if n_missing else " · ✅ complet"))
 else:
     n_missing = 0
-    st.caption("📦 **Leclerc** : ❌ pas de cache")
-    st.caption("🍷 **Vivino** : —")
+    st.caption("📦 __Leclerc__ : ❌ pas de cache")
+    st.caption("🍷 __Vivino__ : —")
 
 st.info("💡 **Les données sont en cache sur le serveur.**\n\n"
         "Revenez plus tard : les données se chargent instantanément.", icon=None)
