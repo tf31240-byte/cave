@@ -1681,6 +1681,37 @@ for k, v in [("wines",[]),("loaded_slug",None),("data_ready",False),
              ("last_live_refresh", 0.0)]:
     if k not in st.session_state: st.session_state[k] = v
 
+# ── REFRESH ANTICIPÉ ──────────────────────────────────────────────────────
+# Charger les données fraîches AVANT tout rendu (sidebar + onglets).
+# Sans ça, st.rerun() redémarre le script mais wines est relu depuis
+# session_state qui peut être périmé si _update_wines_from_cache() est
+# appelé APRÈS le rendu des onglets (trop tard pour ce cycle).
+_early_job = load_job_state()
+if _early_job.get("status") in {"running", "queued"}:
+    _early_slug = _early_job.get("slug")
+    _early_lc   = load_leclerc_cache(_early_slug) if _early_slug else None
+    if _early_lc:
+        _fresh = _merge_vivino(
+            _early_lc["wines"], load_vivino_cache(), load_price_history()
+        )
+        if _fresh:
+            st.session_state.wines       = _fresh
+            st.session_state.loaded_slug = _early_slug
+            st.session_state.data_ready  = True
+
+# ── AUTO-RERUN ────────────────────────────────────────────────────────────
+# Déclencher le rerun ici (avant tout rendu) garantit que les onglets
+# reçoivent les données fraîches chargées ci-dessus, et non les données
+# du cycle précédent.
+if _early_job.get("status") in {"running", "queued"}:
+    _auto_live_on = st.session_state.get("auto_live", True)
+    if _auto_live_on:
+        _now_top = time.time()
+        _elapsed = _now_top - st.session_state.get("last_live_refresh", 0.0)
+        if _elapsed >= 2.0:
+            st.session_state["last_live_refresh"] = _now_top
+            st.rerun()
+
 # ── SIDEBAR ───────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🍾 Type de vin")
@@ -1759,7 +1790,10 @@ with st.sidebar:
     # Nouvelle approche : st.rerun() immédiat avec un délai minimum géré via
     # session_state (last_live_refresh) pour éviter les boucles infinies.
     auto_live = st.checkbox("🟢 Suivi temps réel (auto ~2s)", value=True,
-                            help="Pendant un scraping en arrière-plan, met à jour l'interface automatiquement.")
+                            key="auto_live_chk",
+                            help="Met à jour l'ensemble de l'interface toutes les 2s pendant un scraping.")
+    # Propager la préférence pour le trigger en haut de script
+    st.session_state["auto_live"] = auto_live
 
     if job.get("status") == "running" and job.get("slug") == slug:
         msg = job.get("message", "")
@@ -1878,15 +1912,11 @@ if btn_resume:
     else:
         st.warning("Un job est déjà en cours.")
 
-# Fix B+C : polling — utilise `job` déjà chargé dans la sidebar, pas de 2e load_job_state
-if job.get("status") in {"running", "queued"} and job.get("slug") == slug:
-    _update_wines_from_cache()
-    if auto_live:
-        now = time.time()
-        elapsed = now - st.session_state.get("last_live_refresh", 0.0)
-        if elapsed >= 2.0:
-            st.session_state.last_live_refresh = now
-            st.rerun()
+# Le polling (auto-rerun + _update_wines_from_cache) est maintenant en tête
+# de script, avant tout rendu, pour que les onglets voient les données fraîches.
+# On recharge seulement si le slug du job ne correspond pas au slug actif.
+if job.get("status") in {"running", "queued"} and job.get("slug") != slug:
+    _update_wines_from_cache()   # slug différent — recharger quand même
 
 if job.get("status") == "done" and job.get("slug") == slug:
     _update_wines_from_cache()
