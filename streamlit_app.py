@@ -1385,6 +1385,11 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
             ckpt_tick(slug, ean)
             done_count += 1
             found += bool(res.get("rating"))
+            # Sauvegarde incrémentale tous les 10 résultats → le polling temps réel
+            # voit les nouvelles notes au fur et à mesure (pas seulement à la fin)
+            if done_count % 10 == 0:
+                save_vivino_cache(vc)
+                if log: log(f"  ⚡ [{done_count}/{len(wines)}] {found} notes…")
         else:
             need_selenium.append((w, region))
 
@@ -1417,6 +1422,8 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
                         if vd["ratings_count"] else "—"
                 if log: log(f"  ✅ [{done_count}/{len(wines)}] {wine['name'][:38]}\n"
                             f"     ★ {vd['rating']} · {cnt_s} avis")
+                # Sauvegarde immédiate après chaque note trouvée → visible au prochain rerun
+                save_vivino_cache(vc)
             else:
                 if log and done_count % 5 == 0:
                     log(f"  🍷 [{done_count}/{len(wines)}] — {found} notes trouvées")
@@ -1751,16 +1758,21 @@ with st.sidebar:
     # bloquant le serveur Streamlit pour tous les utilisateurs pendant 5s.
     # Nouvelle approche : st.rerun() immédiat avec un délai minimum géré via
     # session_state (last_live_refresh) pour éviter les boucles infinies.
-    auto_live = st.checkbox("🟢 Suivi temps réel (auto ~5s)", value=True,
+    auto_live = st.checkbox("🟢 Suivi temps réel (auto ~2s)", value=True,
                             help="Pendant un scraping en arrière-plan, met à jour l'interface automatiquement.")
 
     if job.get("status") == "running" and job.get("slug") == slug:
-        st.info(
-            f"⏳ Job en cours ({job.get('mode')})\n\n"
-            f"{job.get('message','')}\n\n"
-            f"Màj: {fmt_age(job.get('updated_at',0))}",
-            icon=None,
-        )
+        msg = job.get("message", "")
+        age = fmt_age(job.get("updated_at", 0))
+        # Extraire le ratio [X/Y] du message pour afficher une barre de progression
+        import re as _re
+        m_prog = _re.search(r"\[(\d+)/(\d+)\]", msg)
+        if m_prog:
+            done_n, total_n = int(m_prog.group(1)), int(m_prog.group(2))
+            pct = done_n / max(total_n, 1)
+            st.progress(pct, text=f"⏳ {done_n}/{total_n} vins · {age}")
+        else:
+            st.info(f"⏳ Job en cours ({job.get('mode')})\n\n{msg}\n\nMàj: {age}", icon=None)
     elif job.get("status") == "done" and job.get("slug") == slug:
         st.success(job.get("message", "✅ Job terminé"), icon=None)
     elif job.get("status") == "error" and job.get("slug") == slug:
@@ -1872,7 +1884,7 @@ if job.get("status") in {"running", "queued"} and job.get("slug") == slug:
     if auto_live:
         now = time.time()
         elapsed = now - st.session_state.get("last_live_refresh", 0.0)
-        if elapsed >= 5.0:
+        if elapsed >= 2.0:
             st.session_state.last_live_refresh = now
             st.rerun()
 
