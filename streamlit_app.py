@@ -64,8 +64,9 @@ VIVINO_API_HEADERS = {
 
 CACHE_DIR = Path(__file__).parent / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
-JOB_STATE_PATH = CACHE_DIR / "job_state.json"
-JOB_LOG_PATH   = CACHE_DIR / "job_log.txt"    # Console : historique complet des logs
+JOB_STATE_PATH    = CACHE_DIR / "job_state.json"
+JOB_LOG_PATH      = CACHE_DIR / "job_log.txt"
+REJECTION_LOG_PATH = CACHE_DIR / "vivino_rejections.json"  # Apprentissage rejets Vivino
 
 WINE_TYPES = {
     "🔴 Rouge":    "vins-rouges",
@@ -315,6 +316,69 @@ def save_vivino_cache(cache: dict) -> None:
         tmp.replace(p)
         _invalidate_mem_cache(p)
     except Exception: tmp.unlink(missing_ok=True); raise
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# REJETS VIVINO — Apprentissage des erreurs de correspondance
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Raisons de rejet — utilisées dans l'UI et pour adapter la stratégie de recherche
+REJECTION_REASONS = {
+    "wrong_wine":     "🍷 Mauvais vin (autre château/domaine)",
+    "wrong_vintage":  "📅 Mauvais millésime",
+    "wrong_producer": "🏭 Mauvais producteur (même appellation)",
+    "other":          "❓ Autre",
+}
+
+def load_vivino_rejections() -> dict:
+    """Charge le log des rejets. Structure : {query → {rejected_urls: [...], history: [...]}}"""
+    if not REJECTION_LOG_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(REJECTION_LOG_PATH.read_text("utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+def save_vivino_rejection(wine_name: str, query: str, rejected_url: str,
+                          rejected_title: str, reason: str) -> None:
+    """Enregistre un rejet et met à jour l'index des URLs rejetées pour ce vin."""
+    data = load_vivino_rejections()
+    entry = data.setdefault(query, {"rejected_urls": [], "history": []})
+    # Ajouter l'URL à la liste noire si pas déjà présente
+    if rejected_url and rejected_url not in entry["rejected_urls"]:
+        entry["rejected_urls"].append(rejected_url)
+    # Historique complet
+    entry["history"].append({
+        "wine_name":      wine_name,
+        "rejected_url":   rejected_url,
+        "rejected_title": rejected_title,
+        "reason":         reason,
+        "ts":             time.time(),
+    })
+    # Analyser les patterns de rejets pour améliorer la stratégie
+    reasons = [h["reason"] for h in entry["history"]]
+    entry["dominant_reason"] = max(set(reasons), key=reasons.count)
+    # Si la majorité des rejets = mauvais vin → baisser le seuil de confiance requis
+    # ou au contraire marquer le vin comme "difficile à trouver"
+    entry["hard_to_match"] = (
+        reasons.count("wrong_wine") >= 2
+        or len(entry["rejected_urls"]) >= 3
+    )
+    try:
+        tmp = REJECTION_LOG_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+        tmp.replace(REJECTION_LOG_PATH)
+    except Exception:
+        pass
+
+def get_rejected_urls(query: str, rejections: dict) -> set:
+    """Retourne l'ensemble des URLs Vivino rejetées pour ce vin."""
+    return set(rejections.get(query, {}).get("rejected_urls", []))
+
+def is_hard_to_match(query: str, rejections: dict) -> bool:
+    """True si ce vin a été signalé trop souvent comme mal matchés → skip Vivino."""
+    return rejections.get(query, {}).get("hard_to_match", False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -885,6 +949,7 @@ def choose_best_vivino_candidate(
     vintage,
     candidates: list[dict],
     region: str = "",
+    rejected_urls: set | None = None,
 ) -> tuple[dict | None, float]:
     """
     Choisit le meilleur candidat Vivino parmi les résultats.
@@ -892,11 +957,23 @@ def choose_best_vivino_candidate(
     - Boost appellation (+0.30) si la région du vin Leclerc est présente dans le titre
     - Millésime exact (+0.20), ±1 an (+0.08), différent (-0.12)
     - Pénalité légère si candidat n'a pas d'année et on en attend une (-0.03)
+    - Filtre les URLs déjà rejetées par l'utilisateur (apprentissage)
     """
     best, best_score = None, -1.0
     region_norm = _norm_ascii(region) if region else ""
+    _rejected = rejected_urls or set()
 
     for c in candidates:
+        # Ignorer les candidats dont l'URL a déjà été rejetée
+        c_url = c.get("url") or (
+            # Pour les candidats API, reconstruire l'URL depuis le record si dispo
+            "https://www.vivino.com/wines/" +
+            (((c.get("record") or {}).get("vintage") or {}).get("wine") or {}).get("seo_name", "")
+            if c.get("record") else ""
+        )
+        if c_url and c_url in _rejected:
+            continue
+
         score = _name_similarity(query, c.get("title", ""))
 
         # Boost appellation : si la région Leclerc figure dans le titre Vivino
@@ -955,21 +1032,17 @@ def _fallback_queries(wine_name: str, vintage) -> list[str]:
 
 
 def fetch_vivino_via_api(query: str, vintage, slug: str = "vins-rouges",
-                         _tried: set | None = None) -> dict | None:
+                         _tried: set | None = None,
+                         rejected_urls: set | None = None) -> dict | None:
     """
     Appel API Vivino avec cascade de requêtes de repli (fix ③).
-
-    Si la query principale ne retourne aucun candidat valide, les requêtes
-    de _fallback_queries() sont tentées automatiquement dans l'ordre :
-    sans appellation → ASCII normalisé → 3 mots → 2 mots.
-
-    ⑨ wine_type_ids dynamique via VIVINO_TYPE_IDS[slug] (rouge/blanc/rosé/mousseux).
-    Session partagée _SESSION avec retry et connection pooling.
+    Apprentissage : rejected_urls filtre les candidats déjà rejetés par l'utilisateur.
     """
     if _tried is None:
         _tried = {query}
     wine_type_id = VIVINO_TYPE_IDS.get(slug, 1)
     region = extract_region(query)
+    _rejected = rejected_urls or set()
     try:
         resp = _SESSION.get(
             "https://www.vivino.com/api/explore/explore",
@@ -993,16 +1066,24 @@ def fetch_vivino_via_api(query: str, vintage, slug: str = "vins-rouges",
             vintage_obj = r.get("vintage", {}) or {}
             wine_obj    = vintage_obj.get("wine", {}) or {}
             title = f"{wine_obj.get('name','')} {vintage_obj.get('name','')}".strip()
-            candidates.append({"title": title, "year": _safe_year(vintage_obj.get("year")), "record": r})
+            # Pré-construire l'URL pour le filtre rejet dans choose_best_vivino_candidate
+            seo = (wine_obj.get("seo_name") or "").strip().lstrip("/")
+            if seo and not seo.startswith(("w/", "wines/")):
+                seo = f"wines/{seo}"
+            c_url = f"https://www.vivino.com/{seo}" if seo else ""
+            candidates.append({"title": title, "year": _safe_year(vintage_obj.get("year")),
+                                "record": r, "url": c_url})
 
-        best, confidence = choose_best_vivino_candidate(query, vintage, candidates, region=region)
+        best, confidence = choose_best_vivino_candidate(
+            query, vintage, candidates, region=region, rejected_urls=_rejected)
 
-        # Aucun candidat valide → cascade de requêtes de repli
+        # Aucun candidat valide → cascade de requêtes de repli (en passant les rejets)
         if not best:
             for fallback_q in _fallback_queries(query, vintage):
                 if fallback_q not in _tried:
                     _tried.add(fallback_q)
-                    result = fetch_vivino_via_api(fallback_q, vintage, slug=slug, _tried=_tried)
+                    result = fetch_vivino_via_api(fallback_q, vintage, slug=slug,
+                                                  _tried=_tried, rejected_urls=_rejected)
                     if result:
                         return result
             return None
@@ -1014,8 +1095,6 @@ def fetch_vivino_via_api(query: str, vintage, slug: str = "vins-rouges",
         vy = _safe_year(vintage_obj.get("year"))
 
         seo_name = (wine_obj.get("seo_name") or "").strip().lstrip("/")
-        # Bug 4 fix : l'API Vivino renvoie seo_name = 'chateau-margaux' (slug nu)
-        # L'URL canonique est /wines/{slug}, pas /{slug} (qui 302-redirige)
         if seo_name and not seo_name.startswith(("w/", "wines/")):
             seo_name = f"wines/{seo_name}"
         vivino_url = f"https://www.vivino.com/{seo_name}" if seo_name else ""
@@ -1339,14 +1418,22 @@ def run_check_stock(slug: str, log=None) -> list:
     return _merge_vivino(wines, vc, load_price_history())
 
 
-def _api_lookup_wine(wine: dict, slug: str) -> tuple[str, str, dict]:
+def _api_lookup_wine(wine: dict, slug: str,
+                     rejections: dict | None = None) -> tuple[str, str, dict]:
     """
     Appel API Vivino pour un vin (exécuté en parallèle).
     Retourne (key, region, résultat) — region calculée ici, réutilisable en Phase 2.
+    Les URLs rejetées par l'utilisateur sont filtrées des candidats.
     """
     key    = build_query(wine["name"])
     region = extract_region(wine["name"])
-    result = fetch_vivino_via_api(key, wine.get("vintage"), slug=slug)
+    _rej   = rejections or {}
+    # Si ce vin est marqué "difficile à matcher" → skip l'API directement
+    if is_hard_to_match(key, _rej):
+        return key, region, None
+    rejected = get_rejected_urls(key, _rej)
+    result = fetch_vivino_via_api(key, wine.get("vintage"), slug=slug,
+                                  rejected_urls=rejected)
     return key, region, result
 
 
@@ -1385,12 +1472,17 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
         if log: log(f"✅ Terminé — {found} notes · {len(vc)} entrées cache")
         return
 
+    # Charger les rejets 1× pour toute la session de scraping
+    _rejections = load_vivino_rejections()
+    n_skip_hard = sum(1 for w in to_process if is_hard_to_match(build_query(w["name"]), _rejections))
+    if n_skip_hard and log:
+        log(f"  ⚠️ {n_skip_hard} vins skippés (trop de rejets précédents)")
+
     # ── PHASE 1 : API parallèle ────────────────────────────────────────────
     if log: log(f"⚡ Phase 1 : appels API parallèles pour {len(to_process)} vins…")
-    # Fix 13 : api_results stocke aussi la region pour éviter un 2e extract_region en Phase 2
     api_results: dict[str, tuple[str, dict | None]] = {}   # key → (region, result)
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_api_lookup_wine, w, slug): w for w in to_process}
+        futures = {pool.submit(_api_lookup_wine, w, slug, _rejections): w for w in to_process}
         for fut in concurrent.futures.as_completed(futures):
             try:
                 key, region, res = fut.result()
@@ -1986,8 +2078,8 @@ for col, (label, _) in zip(sort_cols, SORTS.items()):
 filtered.sort(key=SORTS.get(st.session_state.sort_key, SORTS["🏆 Score"]))
 
 # ── ONGLETS ───────────────────────────────────────────────────────────────
-tab_rank, tab_deals, tab_stats, tab_data, tab_export = st.tabs(
-    ["🏅 Classement", "💡 Bonnes Affaires", "📊 Stats", "🗂️ Données & Cache", "📥 Export"])
+tab_rank, tab_deals, tab_stats, tab_data, tab_export, tab_rej = st.tabs(
+    ["🏅 Classement", "💡 Bonnes Affaires", "📊 Stats", "🗂️ Données & Cache", "📥 Export", "🚫 Rejets Vivino"])
 
 # ── CLASSEMENT ────────────────────────────────────────────────────────────
 with tab_rank:
@@ -2036,36 +2128,77 @@ with tab_rank:
         for i, w in enumerate(page_wines):
             _uid = f"{slug}_{w.get('ean') or i}_{page}"
             _has_viv = bool(w.get("vivino_url"))
+            _reject_key = f"reject_mode_{_uid}"
+
             if _has_viv:
-                # Colonne carte large + colonne bouton étroite
-                # CSS tire la 2e colonne vers la gauche pour la superposer sur la carte
                 _c_card, _c_btn = st.columns([1, 0.08])
                 with _c_card:
                     st.markdown(wine_card_html(w, start + i + 1, max_score),
                                 unsafe_allow_html=True)
                 with _c_btn:
-                    # CSS spécifique à ce bouton : remonte + décale à gauche pour se placer
-                    # directement sur la zone "info" de la carte (nom + liens)
                     st.markdown(
                         f'<style>'
-                        f'div[data-testid="column"]:has(button[data-testid="baseButton-secondary"][title*="{_uid}"])'
+                        f'div[data-testid="column"]:has(button[title*="{_uid}"])'
                         f'{{margin-left:-4.5rem;margin-top:.55rem;z-index:10;position:relative}}'
                         f'</style>',
                         unsafe_allow_html=True)
-                    _key_bad = f"bad_viv_{_uid}"
-                    if st.button("🚫", key=_key_bad,
-                                 help=f"Lien Vivino incorrect ({_uid}) — supprime l'association"):
-                        _vc_live = load_vivino_cache()
-                        _vc_live[build_query(w["name"])] = {
-                            "rating": None, "ratings_count": 0,
-                            "vivino_url": "", "vivino_year": None,
-                            "vintage_match": None, "match_confidence": None,
-                            "manual_override": True, "suppressed": True,
-                            "locked": True, "cached_at": time.time(),
-                        }
-                        save_vivino_cache(_vc_live)
-                        st.toast(f"✅ Lien Vivino supprimé pour « {w['name'][:40]} »", icon="🚫")
+                    if st.button("🚫", key=f"bad_viv_{_uid}",
+                                 help=f"Lien Vivino incorrect ({_uid})"):
+                        st.session_state[_reject_key] = True
                         st.rerun()
+
+                # Formulaire de raison — s'affiche sous la carte si bouton cliqué
+                if st.session_state.get(_reject_key):
+                    with st.container():
+                        st.markdown(
+                            f'<div style="background:#fff5f5;border:1px solid #fca5a5;'
+                            f'border-radius:8px;padding:.6rem .8rem;margin-bottom:.45rem;'
+                            f'font-size:.8rem;color:#7f1d1d">'
+                            f'<strong>🚫 Pourquoi ce lien Vivino est incorrect ?</strong><br>'
+                            f'<em>{w.get("vivino_url","")[:60]}…</em></div>',
+                            unsafe_allow_html=True)
+                        _r_cols = st.columns([3, 1, 1])
+                        with _r_cols[0]:
+                            _reason = st.selectbox(
+                                "Raison",
+                                list(REJECTION_REASONS.keys()),
+                                format_func=lambda k: REJECTION_REASONS[k],
+                                key=f"reason_{_uid}",
+                                label_visibility="collapsed")
+                        with _r_cols[1]:
+                            if st.button("✅ Confirmer", key=f"confirm_rej_{_uid}",
+                                         use_container_width=True, type="primary"):
+                                _vc_live = load_vivino_cache()
+                                _q = build_query(w["name"])
+                                # Récupérer le titre Vivino depuis le cache avant suppression
+                                _old = _vc_live.get(_q, {})
+                                _old_title = _old.get("vivino_url", "")
+                                # Enregistrer le rejet avec raison
+                                save_vivino_rejection(
+                                    wine_name=w["name"],
+                                    query=_q,
+                                    rejected_url=w.get("vivino_url", ""),
+                                    rejected_title=_old_title,
+                                    reason=_reason,
+                                )
+                                # Marquer supprimé dans le cache Vivino
+                                _vc_live[_q] = {
+                                    "rating": None, "ratings_count": 0,
+                                    "vivino_url": "", "vivino_year": None,
+                                    "vintage_match": None, "match_confidence": None,
+                                    "manual_override": True, "suppressed": True,
+                                    "locked": True, "cached_at": time.time(),
+                                }
+                                save_vivino_cache(_vc_live)
+                                st.session_state.pop(_reject_key, None)
+                                _rlab = REJECTION_REASONS[_reason]
+                                st.toast(f"✅ Rejet enregistré · {_rlab}", icon="🚫")
+                                st.rerun()
+                        with _r_cols[2]:
+                            if st.button("Annuler", key=f"cancel_rej_{_uid}",
+                                         use_container_width=True):
+                                st.session_state.pop(_reject_key, None)
+                                st.rerun()
             else:
                 st.markdown(wine_card_html(w, start + i + 1, max_score),
                             unsafe_allow_html=True)
@@ -2506,3 +2639,48 @@ if _console_visible:
                 except Exception: pass
                 st.session_state["console_open"] = False
                 st.rerun()
+
+# ── REJETS VIVINO ─────────────────────────────────────────────────────────
+with tab_rej:
+    _rejs = load_vivino_rejections()
+    if not _rejs:
+        st.info("Aucun rejet enregistré. Cliquez sur 🚫 sur une carte pour signaler un lien Vivino incorrect.")
+    else:
+        # Stats globales
+        total_rej = sum(len(v.get("history",[])) for v in _rejs.values())
+        hard = sum(1 for v in _rejs.values() if v.get("hard_to_match"))
+        r1, r2, r3 = st.columns(3)
+        r1.metric("🚫 Total rejets", total_rej)
+        r2.metric("🍷 Vins concernés", len(_rejs))
+        r3.metric("⚠️ Difficiles à matcher", hard,
+                  help="Vins avec ≥3 rejets ou ≥2 rejets 'mauvais vin' — Vivino skippé au prochain scan")
+        st.divider()
+
+        # Tableau des rejets
+        rows_rej = []
+        for q, entry in sorted(_rejs.items()):
+            for h in entry.get("history", []):
+                rows_rej.append({
+                    "Vin (query)":   q,
+                    "Nom Leclerc":   h.get("wine_name","")[:45],
+                    "URL rejetée":   h.get("rejected_url",""),
+                    "Raison":        REJECTION_REASONS.get(h.get("reason",""), h.get("reason","")),
+                    "Date":          time.strftime("%d/%m/%y %H:%M", time.localtime(h.get("ts",0))),
+                    "Hard":          "⚠️" if entry.get("hard_to_match") else "",
+                })
+        df_rej = pd.DataFrame(rows_rej)
+        st.dataframe(df_rej, use_container_width=True, hide_index=True, height=350,
+                     column_config={"URL rejetée": st.column_config.LinkColumn(display_text="🔗")})
+        st.divider()
+
+        # Actions
+        ra1, ra2 = st.columns([1, 3])
+        with ra1:
+            if st.button("🗑️ Effacer tous les rejets", use_container_width=True):
+                try: REJECTION_LOG_PATH.unlink(missing_ok=True)
+                except Exception: pass
+                st.toast("Rejets effacés.", icon="🗑️")
+                st.rerun()
+        with ra2:
+            st.caption("Les rejets sont utilisés automatiquement lors du prochain scraping Vivino "
+                       "pour éviter de reproposer les mêmes correspondances incorrectes.")
