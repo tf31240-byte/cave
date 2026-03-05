@@ -198,14 +198,17 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif}
 .deal-price{font-family:'DM Mono';font-size:1.05rem;font-weight:700;
   color:#1A0810;white-space:nowrap;text-align:right}
 
-/* Bouton "Lien Vivino incorrect" — discret, petit, aligné à droite */
-div[data-testid="stButton"] button[kind="secondary"][title*="Vivino"] {
-  font-size:.6rem !important;padding:1px 6px !important;
-  opacity:.35;transition:opacity .15s
+/* Bouton 🚫 — petit rond flottant sur la carte */
+.bad-viv-wrap button{
+  width:1.6rem !important;height:1.6rem !important;
+  min-height:0 !important;padding:0 !important;
+  border-radius:50% !important;font-size:.75rem !important;
+  background:rgba(220,38,38,.07) !important;
+  border:1px solid rgba(220,38,38,.25) !important;
+  color:#dc2626 !important;line-height:1 !important;
+  opacity:.45;transition:opacity .15s,transform .15s
 }
-div[data-testid="stButton"] button[kind="secondary"][title*="Vivino"]:hover {
-  opacity:1
-}
+.bad-viv-wrap button:hover{opacity:1;transform:scale(1.15)}
 
 /* Pagination */
 .page-info{font-size:.75rem;color:#8B6B72;font-family:'DM Mono';
@@ -1833,28 +1836,6 @@ with st.sidebar:
     elif job.get("status") == "error" and job.get("slug") == slug:
         st.error(f"Job en erreur: {job.get('error','inconnue')}", icon=None)
 
-    # ── Console ───────────────────────────────────────────────────────────
-    _show_console = (
-        job.get("status") in {"running", "queued", "done", "error"}
-        and JOB_LOG_PATH.exists()
-        and JOB_LOG_PATH.stat().st_size > 0
-    )
-    if _show_console:
-        _console_open = job.get("status") in {"running", "queued"}
-        with st.expander("🖥️ Console", expanded=_console_open):
-            try:
-                _log_txt = JOB_LOG_PATH.read_text("utf-8")
-                # Garder les 200 dernières lignes pour ne pas saturer
-                _log_lines = _log_txt.strip().splitlines()[-200:]
-                st.code("\n".join(_log_lines), language=None)
-            except Exception:
-                st.caption("(log inaccessible)")
-            if st.button("🗑️ Effacer la console", key="clear_console",
-                         use_container_width=True):
-                try: JOB_LOG_PATH.write_text("", "utf-8")
-                except Exception: pass
-                st.rerun()
-
     st.caption(f"📍 Leclerc Blagnac · magasin {STORE_CODE}")
     st.divider()
     st.markdown("### 🔧 Filtres")
@@ -2049,13 +2030,22 @@ with tab_rank:
         page_wines = filtered[start:end]
 
         for i, w in enumerate(page_wines):
-            st.markdown(wine_card_html(w, start + i + 1, max_score), unsafe_allow_html=True)
-            # Bouton "lien Vivino incorrect" — visible seulement si une URL Vivino existe
-            if w.get("vivino_url"):
+            # Bouton 🚫 intégré visuellement sur la carte via une colonne étroite
+            _has_viv = bool(w.get("vivino_url"))
+            if _has_viv:
+                _c_card, _c_btn = st.columns([1, 0.001])
+                with _c_card:
+                    st.markdown(wine_card_html(w, start + i + 1, max_score),
+                                unsafe_allow_html=True)
+                # Le bouton est rendu dans un conteneur CSS qui le superpose à la carte
+                st.markdown(
+                    '<style>.bad-viv-wrap{margin-top:-2.7rem;margin-bottom:.45rem;'
+                    'display:flex;justify-content:flex-end;padding-right:.5rem}</style>'
+                    '<div class="bad-viv-wrap">',
+                    unsafe_allow_html=True)
                 _key_bad = f"bad_viv_{slug}_{w.get('ean') or i}_{page}"
-                if st.button("🚫 Lien Vivino incorrect", key=_key_bad,
-                             help="Signale que le lien Vivino ne correspond pas à ce vin. L'entrée sera supprimée du cache.",
-                             type="secondary"):
+                if st.button("🚫", key=_key_bad,
+                             help="Lien Vivino incorrect — supprime l'association pour ce vin"):
                     _bad_key = build_query(w["name"])
                     _vc_live = load_vivino_cache()
                     _vc_live[_bad_key] = {
@@ -2068,6 +2058,10 @@ with tab_rank:
                     save_vivino_cache(_vc_live)
                     st.toast(f"✅ Lien Vivino supprimé pour « {w['name'][:40]} »", icon="🚫")
                     st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(wine_card_html(w, start + i + 1, max_score),
+                            unsafe_allow_html=True)
 
         # Contrôles de pagination
         if n_pages > 1:
@@ -2469,3 +2463,39 @@ with tab_export:
         st.download_button("⬇️ CSV complet",
             df_wines.drop(columns=["Query"], errors="ignore").to_csv(index=False, sep=";").encode("utf-8-sig"),
             f"vins_{slug}_complet_{today}.csv", "text/csv")
+
+# ── CONSOLE ───────────────────────────────────────────────────────────────
+st.divider()
+_has_log = JOB_LOG_PATH.exists() and JOB_LOG_PATH.stat().st_size > 0
+_console_visible = st.session_state.get("console_open", False)
+
+_con_cols = st.columns([1, 6, 1])
+with _con_cols[0]:
+    _btn_lbl = "▼ Console" if not _console_visible else "▲ Console"
+    if st.button(_btn_lbl, key="toggle_console",
+                 type="primary" if job.get("status") == "running" else "secondary",
+                 help="Affiche l'historique complet des logs du dernier scraping"):
+        st.session_state["console_open"] = not _console_visible
+        st.rerun()
+with _con_cols[1]:
+    if job.get("status") == "running":
+        st.caption(f"🟢 Scraping en cours · {job.get('message','')[:80]}")
+    elif _has_log:
+        st.caption("🖥️ Logs du dernier job disponibles")
+
+if _console_visible:
+    _con_inner = st.container()
+    with _con_inner:
+        try:
+            _log_txt   = JOB_LOG_PATH.read_text("utf-8") if _has_log else "(aucun log)"
+            _log_lines = _log_txt.strip().splitlines()[-300:]
+            st.code("\n".join(_log_lines), language=None)
+        except Exception:
+            st.caption("(log inaccessible)")
+        _cc1, _cc2 = st.columns([1, 5])
+        with _cc1:
+            if st.button("🗑️ Effacer", key="clear_console", use_container_width=True):
+                try: JOB_LOG_PATH.write_text("", "utf-8")
+                except Exception: pass
+                st.session_state["console_open"] = False
+                st.rerun()
