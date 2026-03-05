@@ -65,6 +65,7 @@ VIVINO_API_HEADERS = {
 CACHE_DIR = Path(__file__).parent / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
 JOB_STATE_PATH = CACHE_DIR / "job_state.json"
+JOB_LOG_PATH   = CACHE_DIR / "job_log.txt"    # Console : historique complet des logs
 
 WINE_TYPES = {
     "🔴 Rouge":    "vins-rouges",
@@ -196,6 +197,15 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif}
 .deal-meta{font-size:.73rem;color:#8B6B72;margin-top:.2rem}
 .deal-price{font-family:'DM Mono';font-size:1.05rem;font-weight:700;
   color:#1A0810;white-space:nowrap;text-align:right}
+
+/* Bouton "Lien Vivino incorrect" — discret, petit, aligné à droite */
+div[data-testid="stButton"] button[kind="secondary"][title*="Vivino"] {
+  font-size:.6rem !important;padding:1px 6px !important;
+  opacity:.35;transition:opacity .15s
+}
+div[data-testid="stButton"] button[kind="secondary"][title*="Vivino"]:hover {
+  opacity:1
+}
 
 /* Pagination */
 .page-info{font-size:.75rem;color:#8B6B72;font-family:'DM Mono';
@@ -443,14 +453,25 @@ def _set_job_state(**kwargs) -> None:
 def _background_job(slug: str, mode: str) -> None:
     global _job_buf, _job_buf_last_flush
     # Fix 1 : vider le buffer du job précédent pour ne pas contaminer
-    # le nouveau job avec des champs stale (finished_at, error, etc.)
     with _job_lock:
         _job_buf.clear()
         _job_buf_last_flush = 0.0
+    # Effacer le log précédent au démarrage d'un nouveau job
+    try:
+        JOB_LOG_PATH.write_text("", "utf-8")
+    except Exception:
+        pass
     _set_job_state(status="running", slug=slug, mode=mode, message="Démarrage…", error="")
 
     def _log(msg: str):
         _set_job_state(message=msg)
+        # Appender chaque ligne dans le fichier log → console temps réel
+        try:
+            ts = time.strftime("%H:%M:%S")
+            with JOB_LOG_PATH.open("a", encoding="utf-8") as f:
+                f.write(f"[{ts}] {msg}\n")
+        except Exception:
+            pass
 
     try:
         if mode == "refresh_all":
@@ -1812,6 +1833,28 @@ with st.sidebar:
     elif job.get("status") == "error" and job.get("slug") == slug:
         st.error(f"Job en erreur: {job.get('error','inconnue')}", icon=None)
 
+    # ── Console ───────────────────────────────────────────────────────────
+    _show_console = (
+        job.get("status") in {"running", "queued", "done", "error"}
+        and JOB_LOG_PATH.exists()
+        and JOB_LOG_PATH.stat().st_size > 0
+    )
+    if _show_console:
+        _console_open = job.get("status") in {"running", "queued"}
+        with st.expander("🖥️ Console", expanded=_console_open):
+            try:
+                _log_txt = JOB_LOG_PATH.read_text("utf-8")
+                # Garder les 200 dernières lignes pour ne pas saturer
+                _log_lines = _log_txt.strip().splitlines()[-200:]
+                st.code("\n".join(_log_lines), language=None)
+            except Exception:
+                st.caption("(log inaccessible)")
+            if st.button("🗑️ Effacer la console", key="clear_console",
+                         use_container_width=True):
+                try: JOB_LOG_PATH.write_text("", "utf-8")
+                except Exception: pass
+                st.rerun()
+
     st.caption(f"📍 Leclerc Blagnac · magasin {STORE_CODE}")
     st.divider()
     st.markdown("### 🔧 Filtres")
@@ -2007,6 +2050,24 @@ with tab_rank:
 
         for i, w in enumerate(page_wines):
             st.markdown(wine_card_html(w, start + i + 1, max_score), unsafe_allow_html=True)
+            # Bouton "lien Vivino incorrect" — visible seulement si une URL Vivino existe
+            if w.get("vivino_url"):
+                _key_bad = f"bad_viv_{slug}_{w.get('ean') or i}_{page}"
+                if st.button("🚫 Lien Vivino incorrect", key=_key_bad,
+                             help="Signale que le lien Vivino ne correspond pas à ce vin. L'entrée sera supprimée du cache.",
+                             type="secondary"):
+                    _bad_key = build_query(w["name"])
+                    _vc_live = load_vivino_cache()
+                    _vc_live[_bad_key] = {
+                        "rating": None, "ratings_count": 0,
+                        "vivino_url": "", "vivino_year": None,
+                        "vintage_match": None, "match_confidence": None,
+                        "manual_override": True, "suppressed": True,
+                        "locked": True, "cached_at": time.time(),
+                    }
+                    save_vivino_cache(_vc_live)
+                    st.toast(f"✅ Lien Vivino supprimé pour « {w['name'][:40]} »", icon="🚫")
+                    st.rerun()
 
         # Contrôles de pagination
         if n_pages > 1:
