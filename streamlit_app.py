@@ -198,17 +198,21 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif}
 .deal-price{font-family:'DM Mono';font-size:1.05rem;font-weight:700;
   color:#1A0810;white-space:nowrap;text-align:right}
 
-/* Bouton 🚫 — petit rond flottant sur la carte */
-.bad-viv-wrap button{
-  width:1.6rem !important;height:1.6rem !important;
+/* Bouton 🚫 — petit rond flottant directement sur la carte */
+.bad-viv-wrap button,
+div[data-testid="column"] button[kind="secondary"][title*="bad_viv"],
+div[data-testid="column"] button[data-testid="baseButton-secondary"]{
+  width:1.45rem !important;height:1.45rem !important;
   min-height:0 !important;padding:0 !important;
-  border-radius:50% !important;font-size:.75rem !important;
-  background:rgba(220,38,38,.07) !important;
-  border:1px solid rgba(220,38,38,.25) !important;
+  border-radius:50% !important;font-size:.68rem !important;
+  background:rgba(220,38,38,.06) !important;
+  border:1px solid rgba(220,38,38,.2) !important;
   color:#dc2626 !important;line-height:1 !important;
-  opacity:.45;transition:opacity .15s,transform .15s
+  opacity:.3;transition:opacity .15s,transform .15s
 }
-.bad-viv-wrap button:hover{opacity:1;transform:scale(1.15)}
+div[data-testid="column"] button[data-testid="baseButton-secondary"]:hover{
+  opacity:1 !important;transform:scale(1.2)
+}
 
 /* Pagination */
 .page-info{font-size:.75rem;color:#8B6B72;font-family:'DM Mono';
@@ -2030,35 +2034,38 @@ with tab_rank:
         page_wines = filtered[start:end]
 
         for i, w in enumerate(page_wines):
-            # Bouton 🚫 intégré visuellement sur la carte via une colonne étroite
+            _uid = f"{slug}_{w.get('ean') or i}_{page}"
             _has_viv = bool(w.get("vivino_url"))
             if _has_viv:
-                _c_card, _c_btn = st.columns([1, 0.001])
+                # Colonne carte large + colonne bouton étroite
+                # CSS tire la 2e colonne vers la gauche pour la superposer sur la carte
+                _c_card, _c_btn = st.columns([1, 0.08])
                 with _c_card:
                     st.markdown(wine_card_html(w, start + i + 1, max_score),
                                 unsafe_allow_html=True)
-                # Le bouton est rendu dans un conteneur CSS qui le superpose à la carte
-                st.markdown(
-                    '<style>.bad-viv-wrap{margin-top:-2.7rem;margin-bottom:.45rem;'
-                    'display:flex;justify-content:flex-end;padding-right:.5rem}</style>'
-                    '<div class="bad-viv-wrap">',
-                    unsafe_allow_html=True)
-                _key_bad = f"bad_viv_{slug}_{w.get('ean') or i}_{page}"
-                if st.button("🚫", key=_key_bad,
-                             help="Lien Vivino incorrect — supprime l'association pour ce vin"):
-                    _bad_key = build_query(w["name"])
-                    _vc_live = load_vivino_cache()
-                    _vc_live[_bad_key] = {
-                        "rating": None, "ratings_count": 0,
-                        "vivino_url": "", "vivino_year": None,
-                        "vintage_match": None, "match_confidence": None,
-                        "manual_override": True, "suppressed": True,
-                        "locked": True, "cached_at": time.time(),
-                    }
-                    save_vivino_cache(_vc_live)
-                    st.toast(f"✅ Lien Vivino supprimé pour « {w['name'][:40]} »", icon="🚫")
-                    st.rerun()
-                st.markdown('</div>', unsafe_allow_html=True)
+                with _c_btn:
+                    # CSS spécifique à ce bouton : remonte + décale à gauche pour se placer
+                    # directement sur la zone "info" de la carte (nom + liens)
+                    st.markdown(
+                        f'<style>'
+                        f'div[data-testid="column"]:has(button[data-testid="baseButton-secondary"][title*="{_uid}"])'
+                        f'{{margin-left:-4.5rem;margin-top:.55rem;z-index:10;position:relative}}'
+                        f'</style>',
+                        unsafe_allow_html=True)
+                    _key_bad = f"bad_viv_{_uid}"
+                    if st.button("🚫", key=_key_bad,
+                                 help=f"Lien Vivino incorrect ({_uid}) — supprime l'association"):
+                        _vc_live = load_vivino_cache()
+                        _vc_live[build_query(w["name"])] = {
+                            "rating": None, "ratings_count": 0,
+                            "vivino_url": "", "vivino_year": None,
+                            "vintage_match": None, "match_confidence": None,
+                            "manual_override": True, "suppressed": True,
+                            "locked": True, "cached_at": time.time(),
+                        }
+                        save_vivino_cache(_vc_live)
+                        st.toast(f"✅ Lien Vivino supprimé pour « {w['name'][:40]} »", icon="🚫")
+                        st.rerun()
             else:
                 st.markdown(wine_card_html(w, start + i + 1, max_score),
                             unsafe_allow_html=True)
