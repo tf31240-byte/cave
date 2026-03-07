@@ -1001,16 +1001,53 @@ def leclerc_url(slug: str, page: int = 1) -> str:
     return f"https://www.e.leclerc/cat/{slug}?pageSize={LECLERC_PAGE_SIZE}&page={page}#oaf-sign-code={STORE_CODE}"
 
 def _parse_price(card) -> float:
+    """
+    Extrait le prix d'une carte produit Leclerc.
+    Plusieurs patterns en cascade pour résister aux changements de HTML du site.
+    """
+    # Pattern 1 : bloc dédié prix + dispo
     blk = card.find(class_=lambda c: c and "block-price-and-availability" in c.split())
     if blk:
-        m = re.search(r"(\d+)€,(\d{2})", blk.get_text())
+        m = re.search(r"(\d+)[€\s]*[,.](\d{2})", blk.get_text())
         if m: return float(f"{m.group(1)}.{m.group(2)}")
+
+    # Pattern 2 : classes price-unit + price-cents (ancienne structure)
     ue = card.find_all(class_=lambda c: c and "price-unit"  in c.split())
     ce = card.find_all(class_=lambda c: c and "price-cents" in c.split())
     if ue and ce:
         try:
             return float(f"{ue[0].get_text(strip=True)}.{ce[0].get_text(strip=True).lstrip(',').strip()}")
         except ValueError: pass
+
+    # Pattern 3 : microdata itemprop="price"
+    mp = card.find(itemprop="price")
+    if mp:
+        val = mp.get("content") or mp.get_text(strip=True)
+        try:
+            return float(str(val).replace(",", ".").replace("€", "").strip())
+        except ValueError: pass
+
+    # Pattern 4 : tout élément dont la classe contient "price" ou "prix"
+    for el in card.find_all(class_=lambda c: c and any(
+            p in " ".join(c.split()).lower() for p in ("price", "prix", "amount"))):
+        txt = el.get_text(strip=True)
+        m = re.search(r"(\d+)[,.](\d{2})", txt)
+        if m:
+            try:
+                val = float(f"{m.group(1)}.{m.group(2)}")
+                if 1.0 <= val <= 999.0:   # sanity check : un vin coûte entre 1€ et 999€
+                    return val
+            except ValueError: pass
+
+    # Pattern 5 (fallback ultime) : regex XX,XX € n'importe où dans le HTML de la carte
+    # Robuste à tout changement CSS — on cherche le premier montant plausible
+    for m in re.finditer(r"(?<![0-9])(\d{1,3})[,.](\d{2})\s*€", card.get_text()):
+        try:
+            val = float(f"{m.group(1)}.{m.group(2)}")
+            if 1.0 <= val <= 999.0:
+                return val
+        except ValueError: pass
+
     return 0.0
 
 def parse_cards(html: str) -> list:
@@ -2379,12 +2416,13 @@ def _startup_restore():
         n = restore_from_gist()
         if n > 0:
             return f"✅ {n} fichiers restaurés depuis le Gist"
-        elif _gist_is_configured():
-            return "ℹ️ Gist configuré — premier démarrage, aucune donnée encore"
+        # Gist configuré mais vide (avant le 1er scraping) → silencieux
     return None
 
+# Toast affiché 1× par session uniquement (pas à chaque rerun)
 _restore_msg = _startup_restore()
-if _restore_msg:
+if _restore_msg and not st.session_state.get("_gist_restore_toasted"):
+    st.session_state["_gist_restore_toasted"] = True
     st.toast(_restore_msg, icon="💾")
 
 # ── REFRESH ANTICIPÉ ──────────────────────────────────────────────────────
@@ -2455,8 +2493,7 @@ with st.sidebar:
         st.caption("📦 **Leclerc** : ❌ pas de cache")
         st.caption("🍷 **Vivino** : —")
 
-    st.info("💡 **Les données sont en cache sur le serveur.**\n\n"
-            "Revenez plus tard : les données se chargent instantanément.", icon=None)
+
 
     btn_stock  = st.button("🔄 Vérifier disponibilité", use_container_width=True, type="primary",
                            help="Vérifie les vins en rayon. Vivino depuis le cache.")
@@ -2514,9 +2551,16 @@ with st.sidebar:
         else:
             st.info(f"⏳ Job en cours ({job.get('mode')})\n\n{msg}\n\nMàj: {age}", icon=None)
     elif job.get("status") == "done" and job.get("slug") == slug:
-        st.success(job.get("message", "✅ Job terminé"), icon=None)
+        # Afficher le toast 1× puis effacer le status pour ne pas répéter
+        done_key = f"_job_done_toasted_{job.get('finished_at',0)}"
+        if not st.session_state.get(done_key):
+            st.session_state[done_key] = True
+            st.toast(job.get("message", "✅ Job terminé"), icon="✅")
     elif job.get("status") == "error" and job.get("slug") == slug:
-        st.error(f"Job en erreur: {job.get('error','inconnue')}", icon=None)
+        err_key = f"_job_err_toasted_{job.get('finished_at',0)}"
+        if not st.session_state.get(err_key):
+            st.session_state[err_key] = True
+            st.toast(f"❌ Erreur : {job.get('error','inconnue')}", icon="❌")
 
     st.caption(f"📍 Leclerc Blagnac · magasin {STORE_CODE}")
 
