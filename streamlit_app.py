@@ -75,11 +75,12 @@ WINE_TYPES = {
     "🍾 Mousseux": "vins-mousseux-et-petillants",
 }
 
-# ⑨ : mapping slug → wine_type_id Vivino (1=rouge, 2=blanc, 7=rosé, 3=mousseux)
+# mapping slug Leclerc → wine_type_id Vivino (1=rouge, 2=blanc, 3=mousseux, 4=rosé)
+# FIX : vins-roses était 7 (dessert) au lieu de 4 (rosé)
 VIVINO_TYPE_IDS: dict[str, int] = {
     "vins-rouges":                    1,
     "vins-blancs":                    2,
-    "vins-roses":                     7,
+    "vins-roses":                     4,   # FIX bug : 7=dessert, 4=rosé
     "vins-mousseux-et-petillants":    3,
 }
 
@@ -167,9 +168,13 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif}
 .badge{display:inline-block;padding:.1rem .4rem;border-radius:3px;
   font-size:.58rem;font-family:'DM Mono';margin-right:.15rem;margin-top:.2rem}
 .b-deal{background:rgba(201,168,76,.15);color:#8B6030;border:1px solid rgba(201,168,76,.4)}
-.b-top {background:rgba(107,26,42,.08);color:#6B1A2A;border:1px solid rgba(107,26,42,.2)}
-.b-reg {background:rgba(37,99,235,.06);color:#1d4ed8;border:1px solid rgba(37,99,235,.2)}
+.b-top  {background:rgba(107,26,42,.08);color:#6B1A2A;border:1px solid rgba(107,26,42,.2)}
+.b-reg  {background:rgba(37,99,235,.06);color:#1d4ed8;border:1px solid rgba(37,99,235,.2)}
 .b-stale{background:rgba(245,158,11,.08);color:#92400e;border:1px solid rgba(245,158,11,.3)}
+.b-nat  {background:rgba(22,163,74,.07);color:#15803d;border:1px solid rgba(22,163,74,.25)}
+.b-grape{background:rgba(124,58,237,.06);color:#5b21b6;border:1px solid rgba(124,58,237,.2)}
+.b-style{background:rgba(8,145,178,.06);color:#0e7490;border:1px solid rgba(8,145,178,.2)}
+.b-vol  {background:rgba(180,83,9,.07);color:#92400e;border:1px solid rgba(180,83,9,.2)}
 
 @media (max-width:640px){
   .wine-card{grid-template-columns:1.8rem 1fr;grid-template-rows:auto auto auto;gap:.3rem}
@@ -755,36 +760,45 @@ def _merge_vivino(wines: list, vc: dict, ph: dict | None = None) -> list:
     Injecte données Vivino + calcule score/région/tendance prix.
     Retourne une NOUVELLE liste de copies de dicts pour éviter de muter
     les objets stockés dans st.session_state entre les reruns Streamlit.
+    Nouvelles données propagées : winery, vivino_region, grapes, style_name,
+    is_natural, acidity, tannin, sweetness, body, ratings_count_all
     """
     if ph is None: ph = {}
+    # Champs Vivino enrichis à propager depuis le cache
+    _VIVINO_FIELDS = (
+        "rating", "ratings_count", "ratings_count_all",
+        "vivino_url", "vivino_year", "vintage_match", "match_confidence",
+        "vivino_name", "winery", "vivino_region", "vivino_region_seo",
+        "country", "grapes", "style_name", "is_natural",
+        "acidity", "tannin", "sweetness", "body",
+    )
     result = []
     for w in wines:
-        w = dict(w)          # copie superficielle — évite la mutation in-place
+        w = dict(w)
         key = build_query(w["name"])
         cv  = vc.get(key, {})
         w.setdefault("available", True)
         if cv.get("suppressed"):
-            w["rating"] = None
-            w["ratings_count"] = 0
+            for f in _VIVINO_FIELDS:
+                w[f] = [] if f == "grapes" else (0 if f in ("ratings_count","ratings_count_all") else None)
             w["vivino_url"] = ""
-            w["vivino_year"] = None
-            w["vintage_match"] = None
-            w["match_confidence"] = None
         elif cv.get("rating") is not None or cv.get("vivino_url"):
-            w["rating"]           = cv.get("rating")
-            w["ratings_count"]    = cv.get("ratings_count", 0)
-            w["vivino_url"]       = cv.get("vivino_url", "")
-            w["vivino_year"]      = cv.get("vivino_year")
-            w["vintage_match"]    = cv.get("vintage_match")
-            w["match_confidence"] = cv.get("match_confidence")
-        w.setdefault("rating", None);      w.setdefault("ratings_count", 0)
-        w.setdefault("vivino_url", "");    w.setdefault("vivino_year", None)
-        w.setdefault("vintage_match", None)
-        w.setdefault("match_confidence", None)
+            for f in _VIVINO_FIELDS:
+                if f in cv:
+                    w[f] = cv[f]
+        # Defaults pour les champs manquants
+        for f in _VIVINO_FIELDS:
+            if f not in w:
+                w[f] = [] if f == "grapes" else (0 if f in ("ratings_count","ratings_count_all") else None)
+        w.setdefault("vivino_url", "")
         w["score"]       = compute_score(w.get("rating"), w.get("ratings_count"),
                                           w.get("price"), w.get("vintage_match"))
-        w["region"]      = extract_region(w["name"])
-        w["price_trend"] = price_trend(w.get("ean",""), w.get("price") or 0, ph)
+        # Région : préférer la région Vivino (plus précise) si disponible
+        w["region"]      = w.get("vivino_region") or extract_region(w["name"])
+        w["price_trend"] = price_trend(w.get("ean",""), w.get("price") or 0, ph) if w.get("price") else ""
+        # Propager grapes_hint si Vivino n'en a pas
+        if not w.get("grapes") and w.get("grapes_hint"):
+            w["grapes"] = [g.title() for g in w["grapes_hint"]]
         result.append(w)
     return result
 
@@ -844,7 +858,9 @@ def parse_cards(html: str) -> list:
         ym = re.search(r"\b(19[5-9]\d|20[0-3]\d)\b", name)
         wines.append({"name": name, "price": _parse_price(card),
                       "url": url, "ean": ean, "image": image,
-                      "vintage": int(ym.group(1)) if ym else None})
+                      "vintage":     int(ym.group(1)) if ym else None,
+                      "grapes_hint": extract_grapes_from_name(name),
+                      "volume_cl":   extract_volume_cl(name)})
     return wines
 
 def get_nb_pages(html: str) -> int:
@@ -858,46 +874,286 @@ def get_nb_pages(html: str) -> int:
 # VIVINO — query + parsing + pertinence
 # ═══════════════════════════════════════════════════════════════════════════
 
+# ── Amélioration 3 : dictionnaire d'alias ──────────────────────────────────
+# Noms Leclerc → nom Vivino canonique.
+# Utilisé par build_query si le nom normalisé correspond à un alias connu.
+# Format : {fragment normalisé ASCII → query Vivino correcte}
+_WINE_ALIASES: dict[str, str] = {
+    # Seconds vins et châteaux abrégés
+    "hauts de smith":            "Les Hauts de Smith",
+    "reserve de leoville barton":"La Réserve de Léoville Barton",
+    "carruades de lafite":       "Carruades de Lafite",
+    "chapelle de la mission":    "La Chapelle de la Mission",
+    "second vin lynch bages":    "Echo de Lynch Bages",
+    "pavillon rouge":            "Pavillon Rouge du Château Margaux",
+    "benjamin de beauregard":    "Benjamin de Beauregard",
+    # Producteurs avec alias courants
+    "jaboulet aine":             "Paul Jaboulet Aîné",
+    "delas freres":              "Delas Frères",
+    "e guigal":                  "E. Guigal",
+    "m chapoutier":              "M. Chapoutier",
+    "baron philippe":            "Baron Philippe de Rothschild",
+    # Domaines avec casse ou accent atypiques
+    "clos des papes":            "Clos des Papes",
+    "domaine leflaive":          "Domaine Leflaive",
+    "domaine leroy":             "Domaine Leroy",
+    "denis mortet":              "Denis Mortet",
+    "comte armand":              "Comte Armand",
+}
+
+# Mots à supprimer de la query car présents dans les noms Leclerc
+# mais absents des titres Vivino → diluent le score Jaccard
+_NOISE_WORDS = re.compile(
+    r"\b(rouge|blanc|rosé|rose|sec|demi-sec|moelleux|brut|nature|"
+    r"aop|igp|aoc|appellation|vin de france|vin de pays|"
+    r"grand vin|selection|elevé en fûts de chêne|futs de chene|"
+    r"mis en bouteille|bouteille|magnum|demi-bouteille)\b",
+    re.I | re.U,
+)
+
+# Appellations génériques qui polluent la recherche Vivino
+# (trop communes — présentes dans des centaines de vins)
+# Utilisé aussi par choose_best pour différencier query mono-mot appellation
+# (seuil 0.70) vs nom propre court comme Yquem ou Opus (seuil normal 0.28)
+_GENERIC_APPELLATIONS = {
+    "bordeaux", "bourgogne", "languedoc", "provence",
+    "roussillon", "alsace", "loire", "rhone", "sud ouest",
+    "pays doc", "vin de france",
+    # Appellations mono-mot qui matchent trop facilement
+    "pomerol", "margaux", "medoc", "graves", "sancerre",
+    "chablis", "beaujolais", "muscadet", "cahors", "madiran",
+}
+
+# ── Amélioration 5 : cépages connus ────────────────────────────────────────
+# Utilisé pour extraire les cépages du nom Leclerc ET pour booster la
+# similarité si les cépages Vivino correspondent à ceux du nom du vin.
+_GRAPES = {
+    # Rouges
+    "cabernet sauvignon", "cabernet franc", "merlot", "malbec", "petit verdot",
+    "grenache", "syrah", "shiraz", "mourvèdre", "mourvedre", "carignan", "cinsault",
+    "pinot noir", "gamay", "poulsard", "trousseau", "mondeuse",
+    "tannat", "fer servadou", "côt", "cot", "duras", "negrette",
+    "tempranillo", "garnacha", "bobal",
+    # Blancs
+    "chardonnay", "sauvignon blanc", "sauvignon", "sémillon", "semillon",
+    "chenin blanc", "chenin", "viognier", "marsanne", "roussanne", "grenache blanc",
+    "muscadet", "melon de bourgogne", "muscadet",
+    "riesling", "gewurztraminer", "gewürztraminer", "pinot gris", "pinot blanc",
+    "aligoté", "aligote", "vermentino",
+    "mauzac", "ondenc", "len de lel",
+    # Rosé
+    "cinsaut",
+}
+# Regex compilée pour extraction rapide depuis un nom de vin
+_GRAPE_RE = re.compile(
+    r"\b(" + "|".join(re.escape(g) for g in sorted(_GRAPES, key=len, reverse=True)) + r")\b",
+    re.I | re.U,
+)
+
+def extract_grapes_from_name(wine_name: str) -> list[str]:
+    """
+    Extrait les cépages présents dans le nom Leclerc.
+    Exemples :
+      "Côtes du Rhône Grenache Syrah" → ["Grenache", "Syrah"]
+      "Château Margaux 2019"          → []
+    Retourne des noms en Title Case. Les doublons (mourvèdre/mourvedre)
+    sont dédupliqués par normalisation ASCII.
+    """
+    found, seen_norm = [], set()
+    for m in _GRAPE_RE.finditer(wine_name):
+        raw  = m.group(0)
+        norm = _norm_ascii(raw)
+        if norm not in seen_norm:
+            seen_norm.add(norm)
+            found.append(raw.title())
+    return found
+
+
+# ── Volume depuis nom ───────────────────────────────────────────────────────
+_VOLUME_MAP = {
+    # Formats courants
+    "demi-bouteille": 37.5,
+    "half bottle":    37.5,
+    "magnum":         150,
+    # Grands formats
+    "jeroboam":       300,    # 4 bouteilles
+    "rehoboam":       450,    # 6 bouteilles (Champagne)
+    "imperiale":      600,    # 8 bouteilles (Bordeaux) = Mathusalem Champagne
+    "mathusalem":     600,    # 8 bouteilles
+    "salmanazar":     900,    # 12 bouteilles
+    "balthazar":     1200,    # 16 bouteilles
+    "nabuchodonosor": 1500,   # 20 bouteilles
+    "nebuchadnezzar": 1500,   # graphie alternative
+    "melchior":      1800,    # 24 bouteilles
+    "solomon":       2000,
+    "sovereign":     2500,
+    "primat":        2700,
+    "melchizedek":   3000,
+}
+# Tri par longueur décroissante pour que "demi-bouteille" soit tenté avant "bouteille"
+_VOLUME_RE = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in sorted(_VOLUME_MAP, key=len, reverse=True)) + r")\b",
+    re.I | re.U,
+)
+# Nettoyage final des prépositions/articles orphelins en FIN de query
+# (résidus après suppression des mots-bruit, ex: "Guigal Côtes du Rhône et")
+_TAIL_JUNK_RE = re.compile(
+    r"\s+\b(au|aux|du|de|des|en|par|sur|un|une|le|la|les|et|ou|son|ses|leur|leurs)\b\s*$",
+    re.I | re.U,
+)
+
+def _clean_tail(s: str) -> str:
+    """Supprime les prépositions/articles/conjonctions orphelines en fin de chaîne (itératif)."""
+    prev = None
+    while s != prev:
+        prev = s
+        s = _TAIL_JUNK_RE.sub("", s).strip()
+    return s
+
+
+# Précalculé au niveau module — utilisé dans build_query (évite recompilation à chaque appel)
+_VOLUME_PREFIX_RE = re.compile(
+    r"^(" + "|".join(re.escape(k) for k in sorted(_VOLUME_MAP, key=len, reverse=True)) + r")\s+",
+    re.I,
+)
+
+def extract_volume_cl(wine_name: str) -> float:
+    """
+    Extrait le volume en cl depuis le nom Leclerc (défaut 75cl).
+    Couvre : mots-clés (Magnum, Demi-bouteille, Jeroboam…).
+    Les formats numériques (75cl, 1.5L) n'apparaissent pas dans les
+    labels produit Leclerc scrapés — inutile de les traiter.
+    """
+    m = _VOLUME_RE.search(wine_name)
+    return _VOLUME_MAP.get(m.group(1).lower(), 75.0) if m else 75.0
+
+# ── Type Vivino → slug Leclerc ─────────────────────────────────────────────
+# Permet de détecter si Vivino retourne un vin d'une couleur différente
+_VIVINO_TYPE_TO_SLUG: dict[int, str] = {
+    1: "vins-rouges", 2: "vins-blancs", 3: "vins-mousseux-et-petillants",  # FIX : était "vins-mousseux"
+    4: "vins-roses", 7: "vins-de-dessert", 24: "vins-fortifies",
+}
+
+
 @lru_cache(maxsize=2048)
 def build_query(wine_name: str) -> str:
+    """
+    Construit la query optimale pour la recherche Vivino.
+
+    Améliorations v6 :
+    1. Suppression AOP/IGP/AOC en fin de chaîne (pas seulement après tiret)
+    2. Suppression des mots de couleur et termes génériques (rouge, blanc, sec…)
+    3. Appellations génériques supprimées si elles n'apportent pas de signal
+    4. Résolution d'alias : noms Leclerc abrégés → nom Vivino canonique
+    """
+    # Étape 1 : tronquer au premier séparateur fort (virgule ou " - ")
     nom = re.split(r",\s*|\s+-\s+", wine_name)[0].strip()
-    nom = re.sub(r"^(Magnum|Demi-bouteille)\s+", "", nom, flags=re.I).strip()
+
+    # Étape 2 : supprimer le format en tête (Magnum, Demi-bouteille, Jeroboam…)
+    nom_stripped = _VOLUME_PREFIX_RE.sub("", nom).strip()
+    # Guard : ne pas vider le nom si le format était le seul mot
+    if nom_stripped:
+        nom = nom_stripped
+
+    # Étape 3 : supprimer l'année
     nom = re.sub(r"\b(19|20)\d{2}\b", "", nom).strip().strip("-").strip()
-    if re.match(r"^[A-Z][A-Z\s\'\-]+$", nom): nom = nom.title()
-    cut   = {"Cuvée","Cuvee","Vieilles","Vieille","Grande"}
+
+    # Étape 4 : supprimer AOP/IGP/AOC/Vin de France où qu'ils soient
+    nom = re.sub(r"\s*\b(AOP|IGP|AOC|A\.O\.P|A\.O\.C|I\.G\.P)\b\.?", "", nom, re.I).strip()
+
+    # Étape 5 : normalisation casse (tout-majuscule → Title Case)
+    if re.match(r"^[A-Z][A-Z\s\'\-]+$", nom):
+        nom = nom.title()
+
+    # Étape 6 : supprimer les mots parasites (couleur, termes de vinif…)
+    nom_clean = _NOISE_WORDS.sub(" ", nom).strip()
+    nom_clean = re.sub(r"\s{2,}", " ", nom_clean).strip()
+    # N'appliquer que si le résultat n'est pas trop court
+    if len(nom_clean.split()) >= 2:
+        nom = nom_clean
+
+    # Étape 6b : supprimer les prépositions/conjonctions orphelines en fin
+    nom = _clean_tail(nom)
+
+    # Étape 7 : couper avant les mots-coupure (Cuvée, Vieilles Vignes…)
+    _CUT = {"Cuvée", "Cuvee", "Vieilles", "Vieille", "Grande", "Vignes"}
     words = nom.split()
     for i, w in enumerate(words[2:], 2):
-        if w in cut: nom = " ".join(words[:i]); break
-    m   = re.search(r"-\s*([\w\s\-]+?)\s*(?:AOP|IGP|AOC|Vin de France)", wine_name, re.I)
-    app = m.group(1).strip() if m else ""
-    parts = [nom]
-    if app and app.lower() not in nom.lower(): parts.append(app)
-    result = " ".join(parts).strip()
-    return result if result else wine_name[:40].strip()
+        if w in _CUT:
+            nom = " ".join(words[:i])
+            break
+
+    # Étape 8 : supprimer les appellations génériques en fin de query
+    # (seulement si elles ne sont pas le cœur du nom)
+    words = nom.split()
+    if len(words) > 2:
+        tail = _norm_ascii(words[-1])
+        if tail in _GENERIC_APPELLATIONS:
+            nom = " ".join(words[:-1]).strip()
+
+    # Étape 9 : résolution d'alias
+    nom_key = _norm_ascii(nom)
+    for alias_frag, canonical in _WINE_ALIASES.items():
+        if alias_frag in nom_key:
+            return canonical
+
+    result = nom.strip()
+    return result if len(result) > 2 else wine_name[:40].strip()
+
 
 def _norm_words(s: str) -> set:
     STOP = {"de","du","des","le","la","les","et","au","aux","en","par","sur",
-            "un","une","the","of","and","for","vin","wines","wine"}
+            "un","une","the","of","and","for","vin","wines","wine",
+            "rouge","blanc","rose","rosé","sec","brut"}  # couleurs ajoutées au stop
     return {w for w in re.findall(r"[a-z]{3,}", _norm_ascii(s)) if w not in STOP}
+
 
 def _name_similarity(name1: str, name2: str) -> float:
     """
-    ⑪ CORRIGÉ : Jaccard proper (intersection/union) au lieu de
-    intersection/min qui produisait des faux positifs élevés quand le
-    candidat Vivino n'avait qu'un seul mot en commun.
-    On complète avec un bonus bigram (similarité caractères) pour les noms courts.
+    Score de similarité combiné :
+    - Jaccard sur mots significatifs (70%)
+    - Bigrammes caractères (30%)
+    - Bonus producteur : mot le plus long de name1 exact dans name2 (+0.10)
+    - Pénalité mots exclusifs Vivino : titre Vivino contient des mots absents de la
+      query → signal fort de 2nd vin ou vin différent (-0.08 par mot exclusif, max -0.20)
+    - Pénalité 1er mot absent : si le 1er mot significatif de la query (≥5 car.) est
+      absent du titre Vivino → probablement pas le bon producteur (-0.15)
     """
     w1, w2 = _norm_words(name1), _norm_words(name2)
     if not w1 or not w2: return 0.0
-    union = w1 | w2
-    jaccard = len(w1 & w2) / len(union)
-    # Bonus bigram pour les noms courts ou propriétés avec peu de mots
+    jaccard = len(w1 & w2) / len(w1 | w2)
+
     def bigrams(s):
         a = re.sub(r"[^a-z]", "", _norm_ascii(s))
         return {a[i:i+2] for i in range(len(a)-1)} if len(a) > 1 else set()
-    bg1, bg2 = bigrams(name1), bigrams(name2)
-    bg_score = len(bg1 & bg2) / len(bg1 | bg2) if (bg1 | bg2) else 0.0
-    return round(jaccard * 0.7 + bg_score * 0.3, 4)
+    bg1, bg2  = bigrams(name1), bigrams(name2)
+    bg_score  = len(bg1 & bg2) / len(bg1 | bg2) if (bg1 | bg2) else 0.0
+
+    # Bonus producteur : mot le plus long de name1 présent exactement dans name2
+    key_word = max(w1, key=len, default="")
+    producer_bonus = 0.10 if key_word and len(key_word) >= 5 and key_word in w2 else 0.0
+
+    # Pénalité mots exclusifs Vivino (absents de la query)
+    # Signale un 2nd vin, un sous-domaine ou une cuvée différente
+    # ex: "Château Margaux de Brane" → 'brane' exclusif → -0.08
+    exclusive_vivino = w2 - w1
+    # Ne pénaliser que les mots longs (≥5 car.) — les courts sont souvent des stopwords
+    # non filtrés ou des mots sans signal
+    extra_penalty = min(0.20, len({w for w in exclusive_vivino if len(w) >= 5}) * 0.08)
+
+    # Pénalité 1er mot absent : le 1er mot significatif de la query (hors "chateau")
+    # doit être présent dans le titre Vivino
+    first_word_penalty = 0.0
+    w1_ordered = [w for w in re.findall(r"[a-z]{3,}", _norm_ascii(name1))
+                  if w not in {"chateau","domaine","maison","cave","les","de","du"}]
+    if w1_ordered:
+        first_sig = w1_ordered[0]
+        if len(first_sig) >= 4 and first_sig not in w2:
+            first_word_penalty = 0.15
+
+    base = jaccard * 0.7 + bg_score * 0.3
+    return round(min(1.0, max(0.0, base + producer_bonus - extra_penalty - first_word_penalty)), 4)
+
 
 def _safe_year(val) -> int | None:
     """Caste l'année Vivino en int de façon défensive (str '2019' ou int 2019 → int)."""
@@ -950,23 +1206,29 @@ def choose_best_vivino_candidate(
     candidates: list[dict],
     region: str = "",
     rejected_urls: set | None = None,
+    grapes_hint: list | None = None,
+    slug: str = "vins-rouges",
 ) -> tuple[dict | None, float]:
     """
     Choisit le meilleur candidat Vivino parmi les résultats.
-    Améliorations :
-    - Boost appellation (+0.30) si la région du vin Leclerc est présente dans le titre
+
+    Signaux de scoring :
+    - Similarité nom (Jaccard + bigrammes + bonus producteur)
+    - Boost appellation (+0.30) si région Leclerc dans titre Vivino
     - Millésime exact (+0.20), ±1 an (+0.08), différent (-0.12)
-    - Pénalité légère si candidat n'a pas d'année et on en attend une (-0.03)
-    - Filtre les URLs déjà rejetées par l'utilisateur (apprentissage)
+    - Boost cépage (+0.08/cépage, max +0.20) si cépages Leclerc = cépages Vivino
+    - Pénalité type incohérent (-0.40) si rouge/blanc/rosé ne correspond pas
+    - Boost région Vivino exacte (+0.15) si wine.region.name match
+    - Filtre URLs rejetées par l'utilisateur
     """
     best, best_score = None, -1.0
-    region_norm = _norm_ascii(region) if region else ""
-    _rejected = rejected_urls or set()
+    region_norm  = _norm_ascii(region) if region else ""
+    _rejected    = rejected_urls or set()
+    _grapes_hint = {_norm_ascii(g) for g in (grapes_hint or [])}
 
     for c in candidates:
         # Ignorer les candidats dont l'URL a déjà été rejetée
         c_url = c.get("url") or (
-            # Pour les candidats API, reconstruire l'URL depuis le record si dispo
             "https://www.vivino.com/wines/" +
             (((c.get("record") or {}).get("vintage") or {}).get("wine") or {}).get("seo_name", "")
             if c.get("record") else ""
@@ -976,50 +1238,91 @@ def choose_best_vivino_candidate(
 
         score = _name_similarity(query, c.get("title", ""))
 
-        # Boost appellation : si la région Leclerc figure dans le titre Vivino
-        if region_norm:
-            if region_norm in _norm_ascii(c.get("title", "")):
-                score += 0.30
+        # ── Boost appellation ──────────────────────────────────────────────
+        if region_norm and region_norm in _norm_ascii(c.get("title", "")):
+            score += 0.30
 
+        # ── Millésime ─────────────────────────────────────────────────────
         c_year = c.get("year")
         if vintage and c_year:
-            if c_year == vintage:       score += 0.20
+            if c_year == vintage:            score += 0.20
             elif abs(c_year - vintage) == 1: score += 0.08
-            else:                       score -= 0.12
+            else:                            score -= 0.12
         elif vintage and not c_year:
             score -= 0.03
+
+        # ── Boost cépages (nouveau) ────────────────────────────────────────
+        # Si le nom Leclerc contient des cépages, vérifier s'ils matchent
+        # les cépages retournés par l'API Vivino pour ce candidat
+        if _grapes_hint and c.get("record"):
+            wine_obj   = (c["record"].get("vintage") or {}).get("wine") or {}
+            style      = wine_obj.get("style") or {}
+            viv_grapes = {_norm_ascii(g.get("name","")) for g in (style.get("grapes") or [])}
+            if viv_grapes:
+                common = _grapes_hint & viv_grapes
+                grape_boost = min(0.20, len(common) * 0.08)
+                score += grape_boost
+                # Pénalité si aucun cépage en commun alors qu'on en attendait
+                if not common and len(_grapes_hint) >= 2:
+                    score -= 0.08
+
+        # ── Pénalité type incohérent (nouveau) ────────────────────────────
+        # Si Vivino retourne un vin d'une couleur différente du slug Leclerc
+        if c.get("record"):
+            wine_obj   = (c["record"].get("vintage") or {}).get("wine") or {}
+            viv_type   = wine_obj.get("type_id")
+            if viv_type:
+                expected_slug = _VIVINO_TYPE_TO_SLUG.get(viv_type, "")
+                if expected_slug and expected_slug != slug:
+                    score -= 0.75  # pénalité forte : rouge vs blanc/rosé
+                    # FIX : -0.40 puis -0.60 insuffisants car les couleurs (blanc/rosé)
+                    # sont dans STOP → titre Vivino perd son signal → score de base = 1.0
+                    # -0.75 garantit le rejet (1.0 - 0.75 = 0.25 < seuil 0.28)
+
+        # ── Boost région Vivino exacte (nouveau) ──────────────────────────
+        # wine.region.name est plus précis que notre extract_region
+        if region_norm and c.get("record"):
+            wine_obj   = (c["record"].get("vintage") or {}).get("wine") or {}
+            viv_region = _norm_ascii((wine_obj.get("region") or {}).get("name") or "")
+            if viv_region and (viv_region in region_norm or region_norm in viv_region):
+                score += 0.15
 
         if score > best_score:
             best, best_score = c, score
 
     if not best or best_score < VIVINO_SIMILARITY_MIN:
         return None, best_score
+    # Seuil dynamique : query mono-mot = appellation générique → exige 0.70
+    # Un nom comme "Pomerol" ou "Bordeaux" seul matcherait n'importe quel vin.
+    # En revanche un nom propre court ("Yquem", "Opus", "Gevrey") est très spécifique
+    # → seuil normal 0.28.
+    # Distinction : le mot unique est-il dans _GENERIC_APPELLATIONS ?
+    query_sig_words = _norm_words(query)
+    if len(query_sig_words) <= 1:
+        single_word = _norm_ascii(query).strip()
+        if single_word in _GENERIC_APPELLATIONS and best_score < 0.70:
+            return None, best_score
     return best, best_score
 
 
-def _fallback_queries(wine_name: str, vintage) -> list[str]:
+def _fallback_queries(wine_name: str, vintage,
+                      rejections: dict | None = None) -> list[str]:
     """
     Génère une cascade de requêtes Vivino du plus spécifique au plus général.
-    Utilisée quand la query principale ne retourne aucun candidat.
 
-    Niveaux (la query complète q0 est déjà essayée en amont, exclue ici) :
-      1. Sans appellation  — partie avant le premier " - " du nom original
-      2. ASCII normalisé   — q0 sans accents (orthographes atypiques sur Vivino)
-      3. 3 premiers mots   — réduit au nom de domaine + cuvée
-      4. 2 premiers mots   — château / maison seul
+    Niveaux :
+      1. Sans appellation  — partie avant le premier " - "
+      2. ASCII normalisé   — sans accents
+      3. 3 premiers mots
+      4. 2 premiers mots
+      5. (si mauvais millésime dominant) — query sans vintage pour trouver le bon
+      6. (si mauvais producteur dominant) — query avec appellation seule
     """
     q0 = build_query(wine_name)
-
-    # Niveau 1 : base du nom (avant tiret/virgule), sans AOP/millésime
-    # On réutilise build_query sur la partie avant tiret du nom original
-    base_raw = re.split(r",\s*|\s+-\s+", wine_name)[0].strip()
-    q_no_app = build_query(base_raw) if base_raw != wine_name else q0
-
-    # Niveau 2 : q0 sans accents
-    q_ascii = _norm_ascii(q0).strip()
-
-    # Niveaux 3–4 : N premiers mots de q0
-    words = q0.split()
+    base_raw  = re.split(r",\s*|\s+-\s+", wine_name)[0].strip()
+    q_no_app  = build_query(base_raw) if base_raw != wine_name else q0
+    q_ascii   = _norm_ascii(q0).strip()
+    words     = q0.split()
     q3 = " ".join(words[:3]) if len(words) > 3 else None
     q2 = " ".join(words[:2]) if len(words) > 2 else None
 
@@ -1028,21 +1331,44 @@ def _fallback_queries(wine_name: str, vintage) -> list[str]:
         if q and q not in seen and len(q) > 2:
             seen.add(q)
             result.append(q)
+
+    # Amélioration 4 : adapter la cascade selon la raison dominante des rejets
+    if rejections:
+        entry = rejections.get(q0, {})
+        dominant = entry.get("dominant_reason", "")
+        if dominant == "wrong_vintage" and vintage:
+            # build_query supprime déjà l'année → q_no_vintage = q0.
+            # La vraie correction : retenter la même query mais sans filtrage
+            # par millésime. On utilise la query ascii normalisée comme signal
+            # pour que choose_best ne pénalise pas le mauvais millésime.
+            # En pratique : ajouter q_ascii en priorité haute s'il n'y est pas.
+            if q_ascii not in seen and len(q_ascii) > 2:
+                result.insert(0, q_ascii)  # priorité haute, sans info millésime
+        elif dominant == "wrong_producer":
+            # Tenter avec seulement l'appellation/région extraite
+            region = extract_region(wine_name)
+            if region and region not in seen:
+                result.append(region)
+
     return result
 
 
 def fetch_vivino_via_api(query: str, vintage, slug: str = "vins-rouges",
                          _tried: set | None = None,
-                         rejected_urls: set | None = None) -> dict | None:
+                         rejected_urls: set | None = None,
+                         grapes_hint: list | None = None) -> dict | None:
     """
-    Appel API Vivino avec cascade de requêtes de repli (fix ③).
-    Apprentissage : rejected_urls filtre les candidats déjà rejetés par l'utilisateur.
+    Appel API Vivino avec cascade de requêtes de repli.
+    - grapes_hint : cépages extraits du nom Leclerc → boostent le scoring
+    - winery.name : utilisé comme fallback query si aucun candidat trouvé
+    - Extraction enrichie : winery, region, grapes, taste, type_id
     """
     if _tried is None:
         _tried = {query}
     wine_type_id = VIVINO_TYPE_IDS.get(slug, 1)
     region = extract_region(query)
-    _rejected = rejected_urls or set()
+    _rejected    = rejected_urls or set()
+    _grapes_hint = grapes_hint or []
     try:
         resp = _SESSION.get(
             "https://www.vivino.com/api/explore/explore",
@@ -1066,7 +1392,6 @@ def fetch_vivino_via_api(query: str, vintage, slug: str = "vins-rouges",
             vintage_obj = r.get("vintage", {}) or {}
             wine_obj    = vintage_obj.get("wine", {}) or {}
             title = f"{wine_obj.get('name','')} {vintage_obj.get('name','')}".strip()
-            # Pré-construire l'URL pour le filtre rejet dans choose_best_vivino_candidate
             seo = (wine_obj.get("seo_name") or "").strip().lstrip("/")
             if seo and not seo.startswith(("w/", "wines/")):
                 seo = f"wines/{seo}"
@@ -1075,15 +1400,28 @@ def fetch_vivino_via_api(query: str, vintage, slug: str = "vins-rouges",
                                 "record": r, "url": c_url})
 
         best, confidence = choose_best_vivino_candidate(
-            query, vintage, candidates, region=region, rejected_urls=_rejected)
+            query, vintage, candidates, region=region,
+            rejected_urls=_rejected, grapes_hint=_grapes_hint, slug=slug)
 
-        # Aucun candidat valide → cascade de requêtes de repli (en passant les rejets)
+        # Aucun candidat → cascade de repli
         if not best:
-            for fallback_q in _fallback_queries(query, vintage):
+            _rejs_for_fallback = load_vivino_rejections() if not _rejected else None
+            fallbacks = _fallback_queries(query, vintage, rejections=_rejs_for_fallback)
+
+            # Fallback winery : si le 1er candidat a un winery connu, le tenter
+            if records:
+                w0 = ((records[0].get("vintage") or {}).get("wine") or {})
+                winery_name = (w0.get("winery") or {}).get("name", "")
+                if winery_name and _norm_ascii(winery_name) not in _norm_ascii(query):
+                    if winery_name not in _tried:
+                        fallbacks = [winery_name] + fallbacks
+
+            for fallback_q in fallbacks:
                 if fallback_q not in _tried:
                     _tried.add(fallback_q)
                     result = fetch_vivino_via_api(fallback_q, vintage, slug=slug,
-                                                  _tried=_tried, rejected_urls=_rejected)
+                                                  _tried=_tried, rejected_urls=_rejected,
+                                                  grapes_hint=_grapes_hint)
                     if result:
                         return result
             return None
@@ -1103,13 +1441,36 @@ def fetch_vivino_via_api(query: str, vintage, slug: str = "vins-rouges",
         if vintage and vy:    vmatch = (vintage == vy)
         elif not vintage:     vmatch = True
 
+        # ── Extraction enrichie des données Vivino ─────────────────────────
+        style   = wine_obj.get("style") or {}
+        region_obj = wine_obj.get("region") or {}
+        winery_obj = wine_obj.get("winery") or {}
+        taste   = wine_obj.get("taste") or {}
+        structure = (taste.get("structure") or {})
+
+        grapes_vivino = [g.get("name", "") for g in (style.get("grapes") or []) if g.get("name")]
+
         return {
-            "rating":           stats.get("ratings_average"),
-            "ratings_count":    int(stats.get("ratings_count") or 0),
-            "vivino_url":       vivino_url,
-            "vivino_year":      vy,
-            "vintage_match":    vmatch,
-            "match_confidence": round(confidence, 3),
+            "rating":             stats.get("ratings_average"),
+            "ratings_count":      int(stats.get("ratings_count") or 0),
+            "ratings_count_all":  int((wine_obj.get("statistics") or {}).get("ratings_count") or 0),
+            "vivino_url":         vivino_url,
+            "vivino_year":        vy,
+            "vintage_match":      vmatch,
+            "match_confidence":   round(confidence, 3),
+            # Nouvelles données
+            "vivino_name":        wine_obj.get("name", ""),
+            "winery":             winery_obj.get("name", ""),
+            "vivino_region":      region_obj.get("name", ""),
+            "vivino_region_seo":  region_obj.get("seo_name", ""),
+            "country":            (region_obj.get("country") or {}).get("code", ""),
+            "grapes":             grapes_vivino,
+            "style_name":         style.get("regional_name") or style.get("seo_name", ""),
+            "is_natural":         bool(wine_obj.get("is_natural")),
+            "acidity":            structure.get("acidity"),
+            "tannin":             structure.get("tannin"),
+            "sweetness":          structure.get("sweetness"),
+            "body":               structure.get("intensity"),
         }
     except Exception:
         return None
@@ -1309,7 +1670,8 @@ def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", reg
     query = build_query(wine_name)
 
     # ⑩ Appel API unique — on accepte si confiance ≥ 0.35 ou note présente
-    api_data = fetch_vivino_via_api(query, vintage, slug=slug)
+    _gh = extract_grapes_from_name(wine_name)
+    api_data = fetch_vivino_via_api(query, vintage, slug=slug, grapes_hint=_gh)
     if api_data:
         conf = api_data.get("match_confidence") or 0
         if api_data.get("rating") or (api_data.get("vivino_url") and conf >= 0.35):
@@ -1333,7 +1695,8 @@ def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", reg
             except Exception: pass
             time.sleep(1)
             cands = vivino_candidates_from_search(driver.page_source)
-            return choose_best_vivino_candidate(query, vintage, cands, region=region)
+            return choose_best_vivino_candidate(query, vintage, cands, region=region,
+                                                grapes_hint=_gh, slug=slug)
         except Exception:
             return None, 0.0
 
@@ -1383,11 +1746,21 @@ def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", reg
     elif not vintage:
         vmatch = True
 
+    # Champs enrichis vides — Selenium ne donne pas accès à l'API JSON Vivino
+    # qui contient winery/grapes/region/style. Ils resteront vides dans le cache
+    # et seront remplis lors du prochain scrape API ou d'un refresh.
+    _enriched_empty = {
+        "ratings_count_all": 0, "vivino_name": "", "winery": "",
+        "vivino_region": "", "vivino_region_seo": "", "country": "",
+        "grapes": [], "style_name": "", "is_natural": False,
+        "acidity": None, "tannin": None, "sweetness": None, "body": None,
+    }
+
     if not d.get("rating"):
-        return {"rating": None, "ratings_count": 0,
+        return {**_enriched_empty, "rating": None, "ratings_count": 0,
                 "vivino_url": wine_url, "vivino_year": vy, "vintage_match": vmatch,
                 "match_confidence": round(confidence, 3)}
-    return {"rating": d["rating"], "ratings_count": d["ratings_count"],
+    return {**_enriched_empty, "rating": d["rating"], "ratings_count": d["ratings_count"],
             "vivino_url": wine_url, "vivino_year": vy, "vintage_match": vmatch,
             "match_confidence": round(confidence, 3)}
 
@@ -1420,20 +1793,16 @@ def run_check_stock(slug: str, log=None) -> list:
 
 def _api_lookup_wine(wine: dict, slug: str,
                      rejections: dict | None = None) -> tuple[str, str, dict]:
-    """
-    Appel API Vivino pour un vin (exécuté en parallèle).
-    Retourne (key, region, résultat) — region calculée ici, réutilisable en Phase 2.
-    Les URLs rejetées par l'utilisateur sont filtrées des candidats.
-    """
+    """Appel API Vivino pour un vin (exécuté en parallèle)."""
     key    = build_query(wine["name"])
     region = extract_region(wine["name"])
     _rej   = rejections or {}
-    # Si ce vin est marqué "difficile à matcher" → skip l'API directement
     if is_hard_to_match(key, _rej):
         return key, region, None
     rejected = get_rejected_urls(key, _rej)
     result = fetch_vivino_via_api(key, wine.get("vintage"), slug=slug,
-                                  rejected_urls=rejected)
+                                  rejected_urls=rejected,
+                                  grapes_hint=wine.get("grapes_hint") or [])
     return key, region, result
 
 
@@ -1707,6 +2076,18 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
     if rating and rating >= 4.3:             badges += '<span class="badge b-top">★ Top noté</span>'
     if safe_reg:                             badges += f'<span class="badge b-reg">{safe_reg}</span>'
     if wine.get("_stale"):                   badges += f'<span class="badge b-stale">⏳ obsolète</span>'
+    if wine.get("is_natural"):               badges += '<span class="badge b-nat">🌿 Naturel</span>'
+    # Cépages — max 3, depuis Vivino ou hint Leclerc
+    grapes = wine.get("grapes") or []
+    if grapes:
+        gstr = " · ".join(_html.escape(g) for g in grapes[:3])
+        badges += f'<span class="badge b-grape">🍇 {gstr}</span>'
+    # Style régional Vivino (ex: "Médoc Rouge", "Bourgogne Blanc")
+    if wine.get("style_name"):
+        badges += f'<span class="badge b-style">{_html.escape(wine["style_name"])}</span>'
+    # Volume si différent de 75cl (Magnum, etc.)
+    if wine.get("volume_cl") and wine["volume_cl"] != 75:
+        badges += f'<span class="badge b-vol">{wine["volume_cl"]:.0f}cl</span>'
 
     if rating:
         cnt = wine.get("ratings_count") or 0
@@ -1759,11 +2140,21 @@ def _make_wines_df(ws: list) -> "pd.DataFrame":
         "Région":           w.get("region", ""),
         "Millésime":        w.get("vintage") or "",
         "Prix (€)":         w.get("price") or 0,
+        "Volume (cl)":      w.get("volume_cl") or 75,
         "Tendance":         w.get("price_trend", ""),
         "EAN":              w.get("ean") or "",
         "Note":             w.get("rating") or "",
         "Nb avis":          w.get("ratings_count") or "",
+        "Nb avis (total)":  w.get("ratings_count_all") or "",
         "Score":            w.get("score") or "",
+        "Cépages":          ", ".join(w.get("grapes") or []),
+        "Style":            w.get("style_name") or "",
+        "Domaine":          w.get("winery") or "",
+        "Naturel":          "🌿" if w.get("is_natural") else "",
+        "Tanin":            w.get("tannin") or "",
+        "Acidité":          w.get("acidity") or "",
+        "Sucrosité":        w.get("sweetness") or "",
+        "Corps":            w.get("body") or "",
         "Mil. Vivino":      w.get("vivino_year") or "",
         "Mil. OK":          {True: "✅", False: "⚠️", None: "—"}.get(w.get("vintage_match"), "—"),
         "Dispo":            "✅" if w.get("available", True) else "⛔",
