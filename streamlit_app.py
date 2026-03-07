@@ -64,6 +64,7 @@ VIVINO_API_HEADERS = {
 
 CACHE_DIR = Path(__file__).parent / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
+
 JOB_STATE_PATH    = CACHE_DIR / "job_state.json"
 JOB_LOG_PATH      = CACHE_DIR / "job_log.txt"
 REJECTION_LOG_PATH = CACHE_DIR / "vivino_rejections.json"  # Apprentissage rejets Vivino
@@ -231,6 +232,174 @@ div[data-testid="column"] button[data-testid="baseButton-secondary"]:hover{
 # CACHE
 # ═══════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════
+# PERSISTANCE GIST — sauvegarde sur GitHub Gist (Streamlit Cloud safe)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# POURQUOI : Streamlit Cloud a un filesystem éphémère.
+#   Le dossier .cache/ est effacé à chaque mise en veille (~5 min) ou
+#   redéploiement → toutes les données Vivino (semaines de scraping) perdues.
+#
+# SOLUTION : GitHub Gist comme backend de persistance transparent.
+#   • Au démarrage : si .cache/ vide → restore depuis le Gist
+#   • À chaque save_*  : écriture locale + push Gist en arrière-plan
+#   • Le reste du code ne change pas
+#
+# CONFIGURATION → ajouter dans .streamlit/secrets.toml :
+#   [gist]
+#   github_token = "ghp_xxxxxxxxxxxx"   # token GitHub, scope "gist" suffit
+#   gist_id      = ""                   # laisser vide → créé automatiquement
+#
+# Le Gist est créé en mode privé (public=false).
+# ─────────────────────────────────────────────────────────────────────────
+
+_GIST_API  = "https://api.github.com/gists"
+_GIST_CONF = st.secrets.get("gist", {})
+_GIST_TOKEN   = _GIST_CONF.get("github_token", "")
+_GIST_ID_CFG  = _GIST_CONF.get("gist_id", "")
+
+# Fichiers à persister dans le Gist (filenames exacts du CACHE_DIR)
+_GIST_FILES = {
+    "vivino.json",
+    "leclerc_vins-rouges.json",
+    "leclerc_vins-blancs.json",
+    "leclerc_vins-roses.json",
+    "leclerc_vins-mousseux-et-petillants.json",
+    "price_history.json",
+    "vivino_rejections.json",
+}
+
+_gist_push_lock = threading.Lock()
+
+
+def _gist_headers() -> dict:
+    return {
+        "Authorization": f"token {_GIST_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _gist_is_configured() -> bool:
+    """Renvoie True si le token GitHub est présent."""
+    return bool(_GIST_TOKEN)
+
+
+def _gist_id() -> str:
+    """
+    Retourne l'ID du Gist.
+    Priorité : session_state > secrets.toml > création automatique.
+    La création n'a lieu qu'une seule fois ; l'ID est ensuite affiché
+    pour être copié dans secrets.toml.
+    """
+    if "gist_id" in st.session_state and st.session_state["gist_id"]:
+        return st.session_state["gist_id"]
+    if _GIST_ID_CFG:
+        st.session_state["gist_id"] = _GIST_ID_CFG
+        return _GIST_ID_CFG
+    # Créer un nouveau Gist privé
+    try:
+        resp = requests.post(
+            _GIST_API,
+            headers=_gist_headers(),
+            json={
+                "description": "ScoreMaster — cache Vivino+Leclerc (persistance auto)",
+                "public": False,
+                "files": {"README.md": {"content": (
+                    "# ScoreMaster Cache\n"
+                    "Persistance automatique — ne pas modifier manuellement.\n"
+                )}}
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        gid = resp.json()["id"]
+        st.session_state["gist_id"] = gid
+        return gid
+    except Exception:
+        return ""
+
+
+def gist_push(filename: str, content: str) -> bool:
+    """
+    Pousse un fichier vers le Gist (bloquant).
+    Retourne True si succès, False sinon (non bloquant pour l'app).
+    """
+    if not _gist_is_configured():
+        return False
+    gid = _gist_id()
+    if not gid:
+        return False
+    try:
+        resp = requests.patch(
+            f"{_GIST_API}/{gid}",
+            headers=_gist_headers(),
+            json={"files": {filename: {"content": content}}},
+            timeout=20,
+        )
+        return resp.status_code in (200, 201)
+    except Exception:
+        return False
+
+
+def gist_pull_all() -> dict:
+    """
+    Récupère tous les fichiers du Gist.
+    Retourne {filename: content_str} ou {} si erreur ou non configuré.
+    """
+    if not _gist_is_configured():
+        return {}
+    gid = _gist_id()
+    if not gid:
+        return {}
+    try:
+        resp = requests.get(
+            f"{_GIST_API}/{gid}",
+            headers=_gist_headers(),
+            timeout=20,
+        )
+        resp.raise_for_status()
+        return {
+            fname: fdata.get("content", "")
+            for fname, fdata in resp.json().get("files", {}).items()
+            if fname in _GIST_FILES and fdata.get("content")
+        }
+    except Exception:
+        return {}
+
+
+def _gist_push_async(filename: str, content: str) -> None:
+    """Push non-bloquant : lance gist_push dans un thread daemon."""
+    if not _gist_is_configured():
+        return
+    threading.Thread(
+        target=gist_push, args=(filename, content), daemon=True
+    ).start()
+
+
+def restore_from_gist() -> int:
+    """
+    Restaure les fichiers depuis le Gist vers CACHE_DIR.
+    Appelé au démarrage si le filesystem local est vide.
+    Retourne le nombre de fichiers restaurés (0 si non configuré).
+    """
+    if not _gist_is_configured():
+        return 0
+    restored = 0
+    for fname, content in gist_pull_all().items():
+        if not content:
+            continue
+        target = CACHE_DIR / fname
+        try:
+            json.loads(content)   # valider le JSON avant écriture
+            target.write_text(content, "utf-8")
+            _invalidate_mem_cache(target)
+            restored += 1
+        except Exception:
+            pass   # JSON corrompu dans le Gist → ignorer
+    return restored
+
+
 def _lec_path(slug): return CACHE_DIR / f"leclerc_{slug}.json"
 def _viv_path():     return CACHE_DIR / "vivino.json"
 
@@ -245,10 +414,12 @@ def load_leclerc_cache(slug: str) -> dict | None:
 def save_leclerc_cache(slug: str, wines: list) -> None:
     p, tmp = _lec_path(slug), _lec_path(slug).with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps({"cached_at": time.time(), "slug": slug, "wines": wines},
-                       ensure_ascii=False, indent=2), "utf-8")
+        data_str = json.dumps({"cached_at": time.time(), "slug": slug, "wines": wines},
+                              ensure_ascii=False, indent=2)
+        tmp.write_text(data_str, "utf-8")
         tmp.replace(p)
         _invalidate_mem_cache(p)
+        _gist_push_async(p.name, data_str)  # persistance cloud
     except Exception: tmp.unlink(missing_ok=True); raise
 
 
@@ -317,9 +488,11 @@ def load_vivino_cache() -> dict:
 def save_vivino_cache(cache: dict) -> None:
     p, tmp = _viv_path(), _viv_path().with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), "utf-8")
+        data_str = json.dumps(cache, ensure_ascii=False, indent=2)
+        tmp.write_text(data_str, "utf-8")
         tmp.replace(p)
         _invalidate_mem_cache(p)
+        _gist_push_async(p.name, data_str)  # persistance cloud
     except Exception: tmp.unlink(missing_ok=True); raise
 
 
@@ -372,8 +545,10 @@ def save_vivino_rejection(wine_name: str, query: str, rejected_url: str,
     )
     try:
         tmp = REJECTION_LOG_PATH.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+        data_str = json.dumps(data, ensure_ascii=False, indent=2)
+        tmp.write_text(data_str, "utf-8")
         tmp.replace(REJECTION_LOG_PATH)
+        _gist_push_async(REJECTION_LOG_PATH.name, data_str)  # persistance cloud
     except Exception:
         pass
 
@@ -602,9 +777,11 @@ def load_price_history() -> dict:
 def save_price_history(hist: dict) -> None:
     p, tmp = _price_hist_path(), _price_hist_path().with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps(hist, ensure_ascii=False, indent=2), "utf-8")
+        data_str = json.dumps(hist, ensure_ascii=False, indent=2)
+        tmp.write_text(data_str, "utf-8")
         tmp.replace(p)
         _invalidate_mem_cache(p)            # cohérence du cache mémoire
+        _gist_push_async(p.name, data_str)  # persistance cloud
     except Exception: tmp.unlink(missing_ok=True)
 
 def update_price_history(wines: list) -> None:
@@ -2192,6 +2369,24 @@ for k, v in [("wines",[]),("loaded_slug",None),("data_ready",False),
              ("last_live_refresh", 0.0)]:
     if k not in st.session_state: st.session_state[k] = v
 
+# ── Restauration Gist au démarrage ───────────────────────────────────────
+# @st.cache_resource = exécution 1× par instance (pas à chaque rerun)
+@st.cache_resource
+def _startup_restore():
+    """Restaure les données depuis le Gist si le filesystem local est vide."""
+    has_data = any(CACHE_DIR.glob("*.json"))
+    if not has_data:
+        n = restore_from_gist()
+        if n > 0:
+            return f"✅ {n} fichiers restaurés depuis le Gist"
+        elif _gist_is_configured():
+            return "ℹ️ Gist configuré — premier démarrage, aucune donnée encore"
+    return None
+
+_restore_msg = _startup_restore()
+if _restore_msg:
+    st.toast(_restore_msg, icon="💾")
+
 # ── REFRESH ANTICIPÉ ──────────────────────────────────────────────────────
 # Charger les données fraîches AVANT tout rendu (sidebar + onglets).
 # Sans ça, st.rerun() redémarre le script mais wines est relu depuis
@@ -2324,6 +2519,49 @@ with st.sidebar:
         st.error(f"Job en erreur: {job.get('error','inconnue')}", icon=None)
 
     st.caption(f"📍 Leclerc Blagnac · magasin {STORE_CODE}")
+
+    # ── Statut persistance Gist ───────────────────────────────────────────
+    if _gist_is_configured():
+        gist_cols = st.columns([3, 1])
+        with gist_cols[0]:
+            st.caption("☁️ **Persistance Gist** : activée")
+        with gist_cols[1]:
+            if st.button("↑", key="btn_sync_gist", help="Forcer la sauvegarde vers GitHub Gist maintenant",
+                         use_container_width=True):
+                with st.spinner("Synchronisation…"):
+                    ok = 0
+                    for slug_s in WINE_TYPES.values():
+                        lc_p = _lec_path(slug_s)
+                        if lc_p.exists():
+                            ok += gist_push(lc_p.name, lc_p.read_text("utf-8"))
+                    viv_p = _viv_path()
+                    if viv_p.exists():
+                        ok += gist_push(viv_p.name, viv_p.read_text("utf-8"))
+                    ph_p = _price_hist_path()
+                    if ph_p.exists():
+                        ok += gist_push(ph_p.name, ph_p.read_text("utf-8"))
+                    rej_p = REJECTION_LOG_PATH
+                    if rej_p.exists():
+                        ok += gist_push(rej_p.name, rej_p.read_text("utf-8"))
+                st.toast(f"☁️ {ok} fichiers sauvegardés sur Gist", icon="✅")
+    else:
+        st.caption("☁️ **Persistance** : non configurée")
+        with st.expander("ℹ️ Configurer la persistance"):
+            st.markdown("""
+**Tes données sont perdues quand l'app se met en veille.**
+
+Pour les sauvegarder sur GitHub :
+
+1. Crée un token GitHub : [Settings → Tokens](https://github.com/settings/tokens)  
+   → scope **`gist`** uniquement suffit
+2. Ajoute dans `.streamlit/secrets.toml` :
+```toml
+[gist]
+github_token = "ghp_xxxxxxxxxxxx"
+gist_id      = ""
+```
+3. Redéploie → le Gist est créé automatiquement
+""")
     st.divider()
     st.markdown("### 🔧 Filtres")
 
