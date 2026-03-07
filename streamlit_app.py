@@ -96,6 +96,32 @@ def _make_session() -> requests.Session:
 
 _SESSION = _make_session()
 
+# ── Backoff 429 Vivino (partagé entre tous les threads Phase 1) ──────────────
+_vivino_429_until: float = 0.0
+_vivino_429_lock  = __import__("threading").Lock()
+
+def _vivino_wait_if_throttled() -> None:
+    """Attend si Vivino a retourné 429 récemment."""
+    global _vivino_429_until
+    with _vivino_429_lock:
+        wait = _vivino_429_until - time.time()
+    if wait > 0:
+        time.sleep(max(0.0, wait))
+
+def _vivino_set_backoff(retry_after_hdr: str = "") -> float:
+    """Enregistre un backoff exponentiel après un 429. Retourne le délai en s."""
+    global _vivino_429_until
+    try:
+        delay = float(retry_after_hdr) if retry_after_hdr else 0.0
+    except ValueError:
+        delay = 0.0
+    with _vivino_429_lock:
+        current_wait = max(0.0, _vivino_429_until - time.time())
+        if delay <= 0:
+            delay = max(2.0, min(current_wait * 2 + 2.0, 60.0))
+        _vivino_429_until = time.time() + delay
+    return delay
+
 st.set_page_config(
     page_title="Cave Leclerc Blagnac × Vivino",
     page_icon="🍷",
@@ -185,6 +211,24 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif}
   .wine-price{grid-column:1/3;text-align:left;font-size:.95rem}
   .score-wrap{display:none}
   .wine-name{white-space:normal}
+}
+@media(prefers-color-scheme:dark){
+  .wine-card{background:#1e1212;border-color:#3d2020;color:#e8d5d5}
+  .wine-card.top1{background:linear-gradient(135deg,#2d1f00,#1c1010)}
+  .wine-card.top2{background:linear-gradient(135deg,#1a1a24,#1c1010)}
+  .wine-card.top3{background:linear-gradient(135deg,#1a2018,#1c1010)}
+  .wine-card.unavailable{opacity:.4}
+  .wine-name,.wine-name a{color:#e8d5d5 !important}
+  .wine-sub{color:#b89898}
+  .badge.b-reg{background:#3d2020;color:#e8c0c0}
+  .badge.b-top{background:#7c2d12;color:#fde8d8}
+  .badge.b-stale{background:#374151;color:#9ca3af}
+  .lnk-lec{background:#7c1d1d;color:#fde8d8}
+  .lnk-viv{background:#1d3d7c;color:#d8e8fd}
+  .conf-bar{background:#3d2020}
+  .score-bar-bg{background:#3d2020}
+  .deal-card{background:#1e1212;border-color:#c9a84c}
+  .deal-card.d-top{background:linear-gradient(100deg,#2a2000,#1e1212)}
 }
 
 /* Deals podium */
@@ -1584,6 +1628,7 @@ def fetch_vivino_via_api(query: str, vintage, slug: str = "vins-rouges",
     _rejected    = rejected_urls or set()
     _grapes_hint = grapes_hint or []
     try:
+        _vivino_wait_if_throttled()   # attendre si 429 récent
         resp = _SESSION.get(
             "https://www.vivino.com/api/explore/explore",
             params={
@@ -1597,6 +1642,10 @@ def fetch_vivino_via_api(query: str, vintage, slug: str = "vins-rouges",
             },
             timeout=VIVINO_API_TIMEOUT,
         )
+        if resp.status_code == 429:
+            delay = _vivino_set_backoff(resp.headers.get("Retry-After", ""))
+            time.sleep(delay)   # attendre directement dans cet appel aussi
+            return None
         if resp.status_code != 200:
             return None
 
@@ -1763,6 +1812,32 @@ def make_driver():
     return webdriver.Chrome(options=opts)
 
 
+def _set_store_cookie(driver) -> None:
+    """
+    Injecte le cookie de sélection de magasin avant de scraper.
+    Sans ce cookie, e.leclerc affiche les prix à 0 car le JS ne sait
+    pas quel magasin charger (le fragment #oaf-sign-code= n'est pas fiable).
+    """
+    try:
+        # Naviguer sur la page d'accueil pour établir le domaine
+        driver.get("https://www.e.leclerc/cat/vins-rouges")
+        # Injecter le cookie AVANT de recharger la vraie page
+        driver.add_cookie({
+            "name":   "oafSignCode",
+            "value":  STORE_CODE,
+            "domain": ".e.leclerc",
+            "path":   "/",
+        })
+        driver.add_cookie({
+            "name":   "oaf-sign-code",
+            "value":  STORE_CODE,
+            "domain": ".e.leclerc",
+            "path":   "/",
+        })
+    except Exception:
+        pass   # non-bloquant : l'app fonctionne même sans cookie
+
+
 def scrape_leclerc_full(slug: str, log=None) -> list:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
@@ -1773,13 +1848,14 @@ def scrape_leclerc_full(slug: str, log=None) -> list:
     driver = None
     try:
         driver = make_driver()
+        _set_store_cookie(driver)   # injecter le magasin avant de scraper
         url1 = leclerc_url(slug, 1)
         if log: log(f"🌐 Chargement {url1}…")
         driver.get(url1)
         try: WebDriverWait(driver, 25).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card")))
         except Exception: pass
-        time.sleep(2)
+        time.sleep(3)
         html = driver.page_source
         nb   = min(get_nb_pages(html), MAX_PAGES)
         for w in parse_cards(html):
@@ -1822,6 +1898,7 @@ def check_availability(slug: str, cached_wines: list, log=None) -> list:
     nb_pages = 1
     try:
         driver = make_driver()
+        _set_store_cookie(driver)   # injecter le magasin avant de scraper
         for p in range(1, MAX_PAGES + 1):
             driver.get(leclerc_url(slug, p))
             try: WebDriverWait(driver, 15).until(
@@ -2148,6 +2225,116 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
             if log: log(f"✅ Terminé — {found} notes · {len(vc)} entrées cache")
 
 
+
+def repair_zero_prices(slug: str, log=None) -> int:
+    """
+    Rescrape uniquement les vins dont price=0 ou price=None dans le cache.
+    Utilise Selenium avec cookie magasin pour récupérer les vrais prix.
+    Retourne le nombre de vins corrigés.
+    """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    lc = load_leclerc_cache(slug)
+    if not lc:
+        if log: log("❌ Pas de cache Leclerc.")
+        return 0
+
+    zero_price = [w for w in lc["wines"] if not w.get("price")]
+    if not zero_price:
+        if log: log("✅ Aucun vin avec prix manquant !")
+        return 0
+
+    if log: log(f"🔧 {len(zero_price)} vins avec prix=0 détectés, rescraping…")
+    driver = None
+    fixed = 0
+    try:
+        driver = make_driver()
+        _set_store_cookie(driver)
+
+        # Rescraper toutes les pages et patcher les prix manquants par EAN
+        nb_pages = 1
+        fresh_by_ean: dict[str, float] = {}
+        fresh_by_name: dict[str, float] = {}
+        for p in range(1, MAX_PAGES + 1):
+            driver.get(leclerc_url(slug, p))
+            try:
+                WebDriverWait(driver, 20).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card")))
+            except Exception: pass
+            time.sleep(3)
+            html = driver.page_source
+            if p == 1:
+                nb_pages = min(get_nb_pages(html), MAX_PAGES)
+            for card_w in parse_cards(html):
+                if card_w.get("price") and card_w["price"] > 0:
+                    if card_w.get("ean"):
+                        fresh_by_ean[card_w["ean"]] = card_w["price"]
+                    fresh_by_name[card_w["name"]] = card_w["price"]
+            if p >= nb_pages:
+                break
+
+        # Patcher les vins avec prix=0
+        wines = [dict(w) for w in lc["wines"]]
+        for w in wines:
+            if not w.get("price"):
+                new_price = fresh_by_ean.get(w.get("ean","")) or fresh_by_name.get(w["name"])
+                if new_price:
+                    w["price"] = new_price
+                    fixed += 1
+                    if log: log(f"  ✅ {w['name'][:40]} → {new_price:.2f} €")
+
+        if fixed:
+            save_leclerc_cache(slug, wines)
+            update_price_history(wines)
+            if log: log(f"✅ {fixed}/{len(zero_price)} prix réparés et sauvegardés")
+        else:
+            if log: log(f"⚠️ Aucun prix récupéré — le site n'a peut-être pas chargé les prix")
+    except Exception as e:
+        if log: log(f"❌ Erreur : {e}")
+    finally:
+        if driver is not None:
+            try: driver.quit()
+            except Exception: pass
+    return fixed
+
+
+def get_price_drops(wines: list, ph: dict) -> list[dict]:
+    """
+    Retourne les vins dont le prix a baissé depuis le dernier relevé.
+    Seuil : ≥ 0,50 € ou ≥ 3% de réduction.
+    """
+    drops = []
+    for w in wines:
+        ean = w.get("ean", "")
+        price = w.get("price")
+        if not ean or not price:
+            continue
+        hist = ph.get(ean, {}).get("history", [])
+        if len(hist) < 2:
+            continue
+        # Dernier prix connu AVANT le relevé actuel
+        prev_price = None
+        for entry in reversed(hist[:-1]):
+            if entry.get("price") and entry["price"] != price:
+                prev_price = entry["price"]
+                break
+        if prev_price is None:
+            continue
+        diff  = prev_price - price
+        pct   = diff / prev_price * 100
+        if diff >= 0.50 and pct >= 3.0:
+            drops.append({
+                "wine":       w,
+                "prev_price": prev_price,
+                "curr_price": price,
+                "diff":       diff,
+                "pct":        pct,
+            })
+    drops.sort(key=lambda x: x["pct"], reverse=True)
+    return drops
+
 def run_refresh_vivino(slug: str, resume: bool = False, log=None) -> list:
     lc = load_leclerc_cache(slug)
     if not lc:
@@ -2259,6 +2446,17 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
     name_html = (f'<a href="{safe_url}" target="_blank" '
                  f'style="color:#1A0810;text-decoration:none">{name}</a>'
                  ) if safe_url else name
+
+    # Miniature bouteille (champ image scrappé depuis Leclerc)
+    safe_img = _html.escape(wine.get("image") or "")
+    _none = 'none'
+    img_html = (
+        f'<img src="{safe_img}" alt="" '
+        f'style="width:38px;height:56px;object-fit:contain;'
+        f'float:right;margin:0 0 4px 8px;border-radius:3px;'
+        f'opacity:.92" loading="lazy" '
+        f'onerror="this.style.display=\"{_none}\"" />'
+    ) if safe_img else ""
     yr = (f' <span style="color:#8B6B72;font-size:.68rem;font-weight:400">'
           f'{wine["vintage"]}</span>') if wine.get("vintage") else ""
     unavail = (' <span style="font-size:.62rem;color:#dc2626">⛔ indispo</span>'
@@ -2335,6 +2533,7 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
     return (f'<div class="wine-card {cls}">'
             f'<div class="wine-rank">{icon}</div>'
             f'<div class="wine-info">'
+            f'{img_html}'
             f'<div class="wine-name">{name_html}{yr}{unavail}</div>'
             f'{mil}{links_html}<div>{badges}</div>'
             f'</div>'
@@ -2499,6 +2698,17 @@ with st.sidebar:
                            help="Vérifie les vins en rayon. Vivino depuis le cache.")
     btn_vivino = st.button("🍷 Rafraîchir toutes les notes (arrière-plan)", use_container_width=True,
                            help="Lance le scraping Vivino en tâche de fond pour continuer à utiliser l'app.")
+    # Bouton réparer les prix — visible si des vins ont prix=0
+    n_zero_price = sum(1 for w in (lc["wines"] if lc else []) if not w.get("price"))
+    btn_repair_prices = False
+    if n_zero_price > 0 and lc:
+        btn_repair_prices = st.button(
+            f"🔧 Réparer les prix manquants ({n_zero_price})",
+            use_container_width=True,
+            help=f"{n_zero_price} vins ont un prix à 0€ — rescraping pour récupérer les vrais prix.",
+            type="primary"
+        )
+
     btn_fill = False
     if n_missing > 0 and lc:
         btn_fill = st.button(f"🔎 Compléter les manquants ({n_missing}) (arrière-plan)",
@@ -2643,6 +2853,13 @@ gist_id      = ""
     })
     regions_filter = st.multiselect("🗺️ Région", all_regions_cache, placeholder="Toutes les régions")
 
+    # Filtre cépages
+    _all_grapes = sorted({
+        g for w in (_all_wines or [])
+        for g in (w.get("grapes") or []) if g
+    })
+    grapes_filter = st.multiselect("🍇 Cépage", _all_grapes, placeholder="Tous") if _all_grapes else []
+
     only_vintage = st.checkbox("✅ Millésime confirmé", False)
     only_dispo   = st.checkbox("🏪 Dispos à Blagnac", True)
 
@@ -2705,6 +2922,19 @@ if btn_resume:
     else:
         st.warning("Un job est déjà en cours.")
 
+if btn_repair_prices:
+    with st.status(f"🔧 Réparation des {n_zero_price} prix manquants…", expanded=True) as status:
+        log, _ = _make_logger(10)
+        try:
+            fixed = repair_zero_prices(slug, log=log)
+            if fixed:
+                _update_wines_from_cache()
+                status.update(label=f"✅ {fixed} prix réparés !", state="complete")
+            else:
+                status.update(label="⚠️ Aucun prix récupéré (réessayez)", state="error")
+        except Exception as e:
+            st.error(f"❌ {e}")
+
 # Le polling (auto-rerun + _update_wines_from_cache) est maintenant en tête
 # de script, avant tout rendu, pour que les onglets voient les données fraîches.
 # On recharge seulement si le slug du job ne correspond pas au slug actif.
@@ -2715,10 +2945,25 @@ if job.get("status") == "done" and job.get("slug") == slug:
     _update_wines_from_cache()
 
 wines = st.session_state.wines
+grapes_filter = grapes_filter if 'grapes_filter' in dir() else []
 if not wines:
     st.markdown("<br>", unsafe_allow_html=True)
     st.info("👈 Ouvrez le menu et cliquez sur **Vérifier disponibilité** pour charger les vins.")
     st.stop()
+
+# ── ALERTE PRIX EN BAISSE ─────────────────────────────────────────────────
+_ph_for_alerts = load_price_history()
+_price_drops = get_price_drops(wines, _ph_for_alerts)
+if _price_drops:
+    _drops_key = "price_drops_" + "_".join(d["wine"].get("ean","") for d in _price_drops[:5])
+    if not st.session_state.get("_drops_toasted_" + _drops_key):
+        st.session_state["_drops_toasted_" + _drops_key] = True
+        top = _price_drops[0]
+        st.toast(
+            f"📉 {top['wine']['name'][:32]} : {top['prev_price']:.2f}€ → {top['curr_price']:.2f}€"
+            f" (-{top['pct']:.0f}%)",
+            icon="📉"
+        )
 
 # ── FILTRE ────────────────────────────────────────────────────────────────
 filtered = [w for w in wines
@@ -2728,7 +2973,8 @@ filtered = [w for w in wines
          or _fuzzy_match(search, w.get("region") or ""))
     and (not only_vintage or w.get("vintage_match") is True)
     and (not only_dispo or w.get("available", True))
-    and (not regions_filter or w.get("region","") in regions_filter)]
+    and (not regions_filter or w.get("region","") in regions_filter)
+    and (not grapes_filter or any(g in (w.get("grapes") or []) for g in grapes_filter))]
 
 # ── TRI ───────────────────────────────────────────────────────────────────
 SORTS = {
@@ -2769,11 +3015,28 @@ with tab_rank:
                        delta=None if n_rated_fil==len(filtered) else f"{len(filtered)-n_rated_fil} sans note")
 
     n_bad = sum(1 for w in filtered if w.get("vintage_match") is False)
-    n_drop = sum(1 for w in filtered if w.get("price_trend") == "↓" and w.get("available", True))
-    if n_drop:
+    # Alertes prix en baisse (données réelles de l'historique)
+    _drops_filtered = [d for d in _price_drops if d["wine"] in filtered]
+    if _drops_filtered:
+        _drop_lines = []
+        for d in _drops_filtered[:4]:
+            _drop_lines.append(
+                f"**{d['wine']['name'][:32]}** "
+                f"{d['prev_price']:.2f}€ → {d['curr_price']:.2f}€ "
+                f"(-{d['pct']:.0f}%)"
+            )
+        st.success(
+            f"📉 **{len(_drops_filtered)} vin(s) moins cher(s) qu'au dernier relevé** \n\n"
+            + " · ".join(_drop_lines)
+            + (" …" if len(_drops_filtered) > 4 else ""),
+            icon=None
+        )
+    elif sum(1 for w in filtered if w.get("price_trend") == "↓" and w.get("available", True)):
+        # Fallback sur price_trend si pas encore d'historique suffisant
+        n_drop = sum(1 for w in filtered if w.get("price_trend") == "↓" and w.get("available", True))
         drop_wines = [w for w in filtered if w.get("price_trend") == "↓" and w.get("available", True)]
         drop_names = ", ".join(f"**{w['name'][:35]}** ({w.get('price',0):.2f} €)" for w in drop_wines[:3])
-        st.success(f"📉 **{n_drop} vin(s) en baisse de prix** depuis le dernier relevé : {drop_names}"
+        st.success(f"📉 **{n_drop} vin(s) en baisse de prix** : {drop_names}"
                    + (" …" if n_drop > 3 else ""), icon=None)
     if n_bad: st.warning(f"⚠️ {n_bad} vins avec millésime différent Leclerc / Vivino (bordure orange).")
     st.divider()
