@@ -148,7 +148,7 @@ st.markdown("""
 
 /* ═══════════════ CHROME STREAMLIT ═══════════════ */
 .stApp,[data-testid="stAppViewContainer"]{background:var(--page) !important}
-.stApp,.block-container{overflow-x:hidden !important;max-width:100% !important}
+/* overflow-x géré par élément, pas globalement (cacherait la sidebar) */
 [data-testid="stHeader"]{background:var(--page) !important}
 footer{display:none !important}
 #MainMenu{display:none !important}
@@ -190,10 +190,10 @@ footer{display:none !important}
 /* ═══════════════ EN-TÊTE PAGE ═══════════════ */
 .main-title{
   font-family:'Playfair Display',serif;
-  font-size:clamp(1.3rem,3vw,2.2rem);
-  font-weight:900;color:var(--ink);line-height:1.1;letter-spacing:-.02em;
-  word-break:break-word;overflow-wrap:break-word;
-  max-width:100%;white-space:normal}
+  font-size:clamp(1.1rem,2.2vw,1.9rem);
+  font-weight:900;color:var(--ink);line-height:1.15;letter-spacing:-.02em;
+  word-break:break-word;overflow-wrap:anywhere;
+  max-width:100%;white-space:normal;display:block}
 .main-title span{color:var(--gold)}
 .subtitle{
   color:var(--muted);font-size:.74rem;letter-spacing:.14em;
@@ -3350,18 +3350,19 @@ st.markdown(_counter_html, unsafe_allow_html=True)
 
 # ── TRI ───────────────────────────────────────────────────────────────────
 SORTS = {
-    "💰 Q/P":    lambda x: (-(x.get("score") or 0),   -(x.get("rating") or 0)),
-    "⭐ Note":    lambda x: (-(x.get("rating") or 0),   -(x.get("score") or 0)),
-    "💶 Prix ↑": lambda x: ( (x.get("price") or 9999), -(x.get("score") or 0)),
-    "💶 Prix ↓": lambda x: (-(x.get("price") or 0),    -(x.get("score") or 0)),
+    "Q/P 💰":  lambda x: (-(x.get("score") or 0),   -(x.get("rating") or 0)),
+    "Note ⭐":  lambda x: (-(x.get("rating") or 0),   -(x.get("score") or 0)),
+    "Prix ↑":  lambda x: ( (x.get("price") or 9999), -(x.get("score") or 0)),
+    "Prix ↓":  lambda x: (-(x.get("price") or 0),    -(x.get("score") or 0)),
 }
 _sort_help = {
-    "💰 Q/P":    "Qualité/Prix : note × popularité ÷ prix.",
-    "⭐ Note":    "Note Vivino décroissante.",
-    "💶 Prix ↑": "Du moins cher au plus cher.",
-    "💶 Prix ↓": "Du plus cher au moins cher.",
+    "Q/P 💰":  "Qualité/Prix : note × popularité ÷ prix.",
+    "Note ⭐":  "Note Vivino décroissante.",
+    "Prix ↑":  "Du moins cher au plus cher.",
+    "Prix ↓":  "Du plus cher au moins cher.",
 }
-if "sort_key" not in st.session_state: st.session_state.sort_key = "💰 Q/P"
+if "sort_key" not in st.session_state or st.session_state.sort_key not in SORTS:
+    st.session_state.sort_key = "Q/P 💰"
 _sc1, _sc2, _sc3, _sc4 = st.columns(4)
 for col, (label, fn) in zip([_sc1, _sc2, _sc3, _sc4], SORTS.items()):
     with col:
