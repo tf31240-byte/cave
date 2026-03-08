@@ -746,17 +746,48 @@ def restore_from_gist() -> int:
     Restaure les fichiers depuis le Gist vers CACHE_DIR.
     Appelé au démarrage si le filesystem local est vide.
     Retourne le nombre de fichiers restaurés (0 si non configuré).
+    Gère la migration automatique de l'ancien vivino.json monolithique
+    vers vivino_vins-rouges.json (changement de structure v2).
     """
     if not _gist_is_configured():
         return 0
+    # Pull brut (sans filtre _GIST_FILES) pour récupérer les anciens fichiers
+    gid = _gist_id()
+    if not gid:
+        return 0
+    try:
+        resp = requests.get(f"{_GIST_API}/{gid}", headers=_gist_headers(), timeout=20)
+        resp.raise_for_status()
+        all_files = {
+            fname: fdata.get("content", "")
+            for fname, fdata in resp.json().get("files", {}).items()
+            if fdata.get("content")
+        }
+    except Exception:
+        return 0
     restored = 0
-    for fname, content in gist_pull_all().items():
-        if not content:
+    for fname, file_content in all_files.items():
+        if not file_content:
+            continue
+        # Migration : vivino.json (ancien monolithique) → vivino_vins-rouges.json
+        if fname == "vivino.json":
+            target = CACHE_DIR / "vivino_vins-rouges.json"
+            if not target.exists():
+                try:
+                    json.loads(file_content)
+                    target.write_text(file_content, "utf-8")
+                    _invalidate_mem_cache(target)
+                    restored += 1
+                except Exception:
+                    pass
+            continue
+        # Ignorer les fichiers inconnus (sécurité)
+        if fname not in _GIST_FILES:
             continue
         target = CACHE_DIR / fname
         try:
-            json.loads(content)   # valider le JSON avant écriture
-            target.write_text(content, "utf-8")
+            json.loads(file_content)
+            target.write_text(file_content, "utf-8")
             _invalidate_mem_cache(target)
             restored += 1
         except Exception:
