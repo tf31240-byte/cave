@@ -151,9 +151,10 @@ st.markdown("""
 /* overflow-x géré par élément, pas globalement (cacherait la sidebar) */
 [data-testid="stHeader"]{background:var(--page) !important}
 footer{display:none !important}
-#MainMenu{display:none !important}
+/* #MainMenu conservé — nécessaire pour ouvrir la sidebar */
 [data-testid="stToolbar"]{display:none !important}
 [data-testid="stMainBlockContainer"]{padding-top:1.6rem !important}
+[data-testid="stMainBlockContainer"]>div{overflow-x:clip}
 
 /* ═══════════════ SIDEBAR ═══════════════ */
 [data-testid="stSidebar"]{
@@ -190,10 +191,10 @@ footer{display:none !important}
 /* ═══════════════ EN-TÊTE PAGE ═══════════════ */
 .main-title{
   font-family:'Playfair Display',serif;
-  font-size:clamp(1.1rem,2.2vw,1.9rem);
-  font-weight:900;color:var(--ink);line-height:1.15;letter-spacing:-.02em;
+  font-size:clamp(1rem,3.5vw,1.75rem);
+  font-weight:900;color:var(--ink);line-height:1.2;letter-spacing:-.02em;
   word-break:break-word;overflow-wrap:anywhere;
-  max-width:100%;white-space:normal;display:block}
+  width:100%;max-width:100%;white-space:normal;display:block;box-sizing:border-box}
 .main-title span{color:var(--gold)}
 .subtitle{
   color:var(--muted);font-size:.74rem;letter-spacing:.14em;
