@@ -153,7 +153,7 @@ st.markdown("""
 footer{display:none !important}
 /* #MainMenu conservé — nécessaire pour ouvrir la sidebar */
 /* stToolbar conservé — contient le toggle sidebar */
-[data-testid="stMainBlockContainer"]{padding-top:1.6rem !important}
+[data-testid="stMainBlockContainer"]{padding-top:4rem !important}
 
 
 /* ═══════════════ SIDEBAR ═══════════════ */
