@@ -136,239 +136,371 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,700&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
 
-/* ── Variables globales ─────────────────────────── */
+/* ═══════════════ VARIABLES ═══════════════ */
 :root{
-  --bx:#6B1A2A;--gold:#C9A84C;--ink:#1A0810;
-  --muted:#8B6B72;--border:#EDE4E8;
-  --card:#ffffff;--sh:0 1px 4px rgba(26,8,16,.05),0 4px 16px rgba(26,8,16,.07);
+  --bx:#6B1A2A;--bx-light:#8B2A3A;--gold:#C9A84C;--gold-light:#E5C97A;
+  --ink:#1A0810;--muted:#8B6B72;--border:#EDE4E8;
+  --card:#FFFFFF;--page:#FAF5F2;
+  --sh:0 1px 3px rgba(26,8,16,.04),0 4px 16px rgba(26,8,16,.07);
+  --sh-hover:0 6px 20px rgba(26,8,16,.11),0 16px 40px rgba(26,8,16,.06);
+  --r:14px;
 }
 
-/* ── Base ───────────────────────────────────────── */
-html,body,[class*="css"]{font-family:'DM Sans',sans-serif}
+/* ═══════════════ CHROME STREAMLIT ═══════════════ */
+.stApp,[data-testid="stAppViewContainer"]{background:var(--page) !important}
+[data-testid="stHeader"]{background:var(--page) !important}
+footer{display:none !important}
+#MainMenu{display:none !important}
+[data-testid="stToolbar"]{display:none !important}
+[data-testid="stMainBlockContainer"]{padding-top:1.6rem !important}
 
-/* ── En-tête ────────────────────────────────────── */
+/* ═══════════════ SIDEBAR ═══════════════ */
+[data-testid="stSidebar"]{
+  background:linear-gradient(175deg,#20080F 0%,#2E1018 50%,#1A0810 100%) !important;
+  border-right:1px solid rgba(201,168,76,.18) !important}
+[data-testid="stSidebar"] *{color:#E8D0D5 !important}
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3{color:#F5E6E8 !important;letter-spacing:.02em}
+[data-testid="stSidebar"] .stMarkdown p{color:#C8A8B0 !important;font-size:.82rem}
+[data-testid="stSidebar"] [data-testid="stSelectbox"] > div > div{
+  background:rgba(255,255,255,.06) !important;
+  border-color:rgba(201,168,76,.25) !important;color:#F5E6E8 !important;
+  border-radius:8px !important}
+[data-testid="stSidebar"] .stButton button{
+  border-radius:8px !important;font-weight:500 !important;
+  font-size:.8rem !important;transition:all .15s !important}
+[data-testid="stSidebar"] .stButton button[kind="primary"]{
+  background:var(--gold) !important;border:none !important;
+  color:#1A0810 !important;font-weight:700 !important}
+[data-testid="stSidebar"] .stButton button[kind="primary"]:hover{
+  background:var(--gold-light) !important;transform:translateY(-1px) !important;
+  box-shadow:0 4px 12px rgba(201,168,76,.35) !important}
+[data-testid="stSidebar"] .stButton button[kind="secondary"]{
+  background:rgba(255,255,255,.07) !important;
+  border-color:rgba(232,208,213,.2) !important;color:#E8D0D5 !important}
+[data-testid="stSidebar"] .stButton button[kind="secondary"]:hover{
+  background:rgba(255,255,255,.12) !important}
+[data-testid="stSidebar"] .stCheckbox label span{color:#C8A8B0 !important;font-size:.78rem}
+[data-testid="stSidebar"] hr{border-color:rgba(201,168,76,.18) !important;margin:.7rem 0 !important}
+[data-testid="stSidebar"] .stCaption{color:#A88090 !important}
+[data-testid="stSidebar"] .stCaption strong{color:#E8D0D5 !important}
+
+/* ═══════════════ EN-TÊTE PAGE ═══════════════ */
 .main-title{
   font-family:'Playfair Display',serif;
-  font-size:clamp(1.6rem,4vw,2.4rem);
-  font-weight:900;color:var(--ink);line-height:1.05;letter-spacing:-.01em}
+  font-size:clamp(1.7rem,4vw,2.6rem);
+  font-weight:900;color:var(--ink);line-height:1.05;letter-spacing:-.02em}
 .main-title span{color:var(--gold)}
-.subtitle{color:var(--muted);font-size:.78rem;letter-spacing:.12em;
-  text-transform:uppercase;margin-top:.2rem}
+.subtitle{
+  color:var(--muted);font-size:.74rem;letter-spacing:.14em;
+  text-transform:uppercase;margin-top:.25rem;margin-bottom:.1rem}
+.title-rule{
+  display:block;height:2px;width:3.5rem;
+  background:linear-gradient(90deg,var(--gold),transparent);
+  border:none;margin:.55rem 0 .8rem;border-radius:2px}
 
-/* ── Carte vin ──────────────────────────────────── */
+/* ═══════════════ MÉTRIQUES STREAMLIT ═══════════════ */
+[data-testid="stMetric"]{
+  background:var(--card);border-radius:12px;
+  padding:.65rem .9rem;
+  box-shadow:0 1px 3px rgba(26,8,16,.05),0 2px 8px rgba(26,8,16,.06);
+  border:1px solid var(--border)}
+[data-testid="stMetricLabel"]{
+  font-size:.65rem !important;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--muted) !important;font-weight:600}
+[data-testid="stMetricValue"]{
+  font-family:'DM Mono',monospace;font-size:1.15rem !important;
+  font-weight:700;color:var(--ink) !important;
+  font-feature-settings:"tnum"}
+
+/* ═══════════════ CARTE VIN ═══════════════ */
 .wine-card{
-  background:var(--card);border-radius:14px;
-  padding:.85rem 1.1rem;margin-bottom:.45rem;
+  background:var(--card);border-radius:var(--r);
+  padding:.85rem 1.1rem;margin-bottom:.4rem;
   border-left:4px solid var(--bx);box-shadow:var(--sh);
   display:grid;
-  /* colonnes fixes — stable quel que soit le contenu */
   grid-template-columns:2.2rem 1fr 5.8rem 5.4rem 7rem;
   align-items:center;gap:.7rem;
-  transition:box-shadow .18s,transform .18s}
-.wine-card:hover{
-  box-shadow:0 6px 24px rgba(26,8,16,.12),0 12px 32px rgba(26,8,16,.05);
-  transform:translateY(-2px)}
+  transition:box-shadow .2s,transform .2s}
+.wine-card:hover{box-shadow:var(--sh-hover);transform:translateY(-2px)}
 
 /* Podium */
 .wine-card.top1{
   border-left:5px solid var(--gold);
-  background:linear-gradient(108deg,#FFF9EC 0%,#FFFFFF 52%);
-  box-shadow:0 3px 18px rgba(201,168,76,.16),0 8px 28px rgba(201,168,76,.08)}
+  background:linear-gradient(108deg,#FFF9EC 0%,var(--card) 50%);
+  box-shadow:0 2px 12px rgba(201,168,76,.14),0 6px 24px rgba(201,168,76,.07)}
 .wine-card.top2{
-  border-left:5px solid #B0B0B0;
-  background:linear-gradient(108deg,#F4F4F6 0%,#FFFFFF 52%)}
+  border-left:5px solid #B4B4B4;
+  background:linear-gradient(108deg,#F5F5F7 0%,var(--card) 50%)}
 .wine-card.top3{
-  border-left:5px solid #C0723A;
-  background:linear-gradient(108deg,#FBF1E8 0%,#FFFFFF 52%)}
+  border-left:5px solid #C47540;
+  background:linear-gradient(108deg,#FCF1E9 0%,var(--card) 50%)}
 .wine-card.vintage-warn{border-right:3px solid #f59e0b}
-.wine-card.unavailable{opacity:.32;filter:grayscale(65%)}
+.wine-card.unavailable{opacity:.3;filter:grayscale(60%)}
 .wine-card.stale{border-left-style:dashed}
 
-/* Rang */
 .wine-rank{
   font-family:'DM Mono',monospace;font-size:1.2rem;
   text-align:center;line-height:1;flex-shrink:0}
 
-/* Infos ─ colonne centrale */
 .wine-info{min-width:0;position:relative}
-/* image bouteille en absolue top-right dans la colonne infos */
 .wine-bottle{
   position:absolute;right:0;top:50%;transform:translateY(-50%);
-  width:36px;height:54px;object-fit:contain;
-  border-radius:3px;opacity:.88;pointer-events:none}
-/* quand image présente : padding-right pour ne pas chevaucher le nom */
-.wine-info.has-img{padding-right:46px}
+  width:34px;height:52px;object-fit:contain;
+  border-radius:3px;opacity:.85;pointer-events:none}
+.wine-info.has-img{padding-right:44px}
 .wine-name{
   font-weight:600;font-size:.87rem;color:var(--ink);
   display:-webkit-box;-webkit-line-clamp:2;
-  -webkit-box-orient:vertical;overflow:hidden;line-height:1.4}
-.wine-name a{color:inherit;text-decoration:none}
+  -webkit-box-orient:vertical;overflow:hidden;line-height:1.42}
+.wine-name a{color:inherit;text-decoration:none;transition:color .15s}
 .wine-name a:hover{color:var(--bx)}
 .wine-year{
-  color:var(--muted);font-size:.66rem;font-weight:400;
+  color:var(--muted);font-size:.65rem;font-weight:400;
   margin-left:.3rem;font-style:italic;white-space:nowrap}
 .wine-unavail{font-size:.6rem;color:#dc2626;margin-left:.3rem;white-space:nowrap}
-.wine-sub{font-size:.67rem;color:var(--muted);margin-top:.12rem}
+.wine-sub{font-size:.67rem;color:var(--muted);margin-top:.1rem}
 
-/* Liens + 🚫 sur la même ligne */
 .wine-links{
-  display:flex;gap:.28rem;margin-top:.32rem;
-  flex-wrap:wrap;align-items:center}
+  display:flex;gap:.25rem;margin-top:.3rem;flex-wrap:wrap;align-items:center}
 .lnk{
-  font-size:.6rem;text-decoration:none;border-radius:4px;
-  padding:2px 6px;border:1px solid;white-space:nowrap;
-  font-family:'DM Mono';font-weight:500;transition:background .12s,color .12s}
-.lnk-lec{color:#1d4ed8;border-color:rgba(29,78,216,.3)}
+  font-size:.59rem;text-decoration:none;border-radius:20px;
+  padding:2px 7px;border:1px solid;white-space:nowrap;
+  font-family:'DM Mono';font-weight:500;
+  transition:background .12s,color .12s,border-color .12s}
+.lnk-lec{color:#1d4ed8;border-color:rgba(29,78,216,.28)}
 .lnk-lec:hover{background:rgba(29,78,216,.07)}
-.lnk-viv{color:#6b21a8;border-color:rgba(107,33,168,.3)}
+.lnk-viv{color:#6b21a8;border-color:rgba(107,33,168,.28)}
 .lnk-viv:hover{background:rgba(107,33,168,.07)}
-/* 🚫 — même style lnk mais rouge discret */
-.lnk-bad{
-  color:rgba(220,38,38,.45);border-color:rgba(220,38,38,.2);
-  cursor:pointer;background:transparent}
-.lnk-bad:hover{
-  color:#dc2626;border-color:rgba(220,38,38,.55);
-  background:rgba(220,38,38,.05)}
 
-/* Barre confiance */
 .conf-bar{
-  height:3px;border-radius:2px;margin-top:5px;
+  height:3px;border-radius:2px;margin-top:4px;
   background:var(--border);overflow:hidden}
 .conf-fill{height:100%;border-radius:2px}
 
-/* Badges */
+/* Badges — pills */
 .badge{
-  display:inline-block;padding:.1rem .42rem;border-radius:4px;
-  font-size:.58rem;font-family:'DM Mono';font-weight:500;
-  margin-right:.12rem;margin-top:.22rem;letter-spacing:.02em;
-  vertical-align:middle}
-.b-deal {background:rgba(201,168,76,.12);color:#7a5520;border:1px solid rgba(201,168,76,.32)}
-.b-top  {background:rgba(107,26,42,.07);color:#6B1A2A;border:1px solid rgba(107,26,42,.16)}
-.b-reg  {background:rgba(29,78,216,.05);color:#1d4ed8;border:1px solid rgba(29,78,216,.16)}
-.b-stale{background:rgba(245,158,11,.07);color:#92400e;border:1px solid rgba(245,158,11,.22)}
-.b-nat  {background:rgba(22,163,74,.06);color:#166534;border:1px solid rgba(22,163,74,.2)}
-.b-grape{background:rgba(109,40,217,.05);color:#5b21b6;border:1px solid rgba(109,40,217,.16)}
-.b-style{background:rgba(8,145,178,.05);color:#0e7490;border:1px solid rgba(8,145,178,.16)}
-.b-vol  {background:rgba(180,83,9,.06);color:#92400e;border:1px solid rgba(180,83,9,.16)}
+  display:inline-block;padding:.1rem .5rem;border-radius:20px;
+  font-size:.57rem;font-family:'DM Mono';font-weight:500;
+  margin-right:.1rem;margin-top:.2rem;letter-spacing:.02em;
+  vertical-align:middle;border:1px solid}
+.b-deal {background:rgba(201,168,76,.10);color:#7a5520;border-color:rgba(201,168,76,.28)}
+.b-top  {background:rgba(107,26,42,.07);color:#6B1A2A;border-color:rgba(107,26,42,.14)}
+.b-reg  {background:rgba(29,78,216,.05);color:#1d4ed8;border-color:rgba(29,78,216,.15)}
+.b-stale{background:rgba(245,158,11,.07);color:#92400e;border-color:rgba(245,158,11,.2)}
+.b-nat  {background:rgba(22,163,74,.06);color:#166534;border-color:rgba(22,163,74,.18)}
+.b-grape{background:rgba(109,40,217,.05);color:#5b21b6;border-color:rgba(109,40,217,.15)}
+.b-style{background:rgba(8,145,178,.05);color:#0e7490;border-color:rgba(8,145,178,.15)}
+.b-vol  {background:rgba(180,83,9,.06);color:#92400e;border-color:rgba(180,83,9,.15)}
 
-/* Note */
 .wine-rating{text-align:center}
-.stars{
-  color:var(--gold);font-size:.8rem;letter-spacing:.4px;
-  display:block;line-height:1.2}
+.stars{color:var(--gold);font-size:.8rem;letter-spacing:.3px;display:block;line-height:1.2}
 .r-num{
-  font-family:'DM Mono';font-size:.92rem;font-weight:700;color:var(--ink);
-  font-feature-settings:"tnum";display:block;margin-top:.08rem}
+  font-family:'DM Mono';font-size:1.02rem;font-weight:700;
+  color:var(--ink);font-feature-settings:"tnum";
+  display:block;margin-top:.06rem;line-height:1}
 .r-cnt{
-  font-size:.56rem;color:var(--muted);display:block;margin-top:.04rem;
-  font-feature-settings:"tnum"}
-.no-rat{font-size:.62rem;color:#ccc;font-style:italic;text-align:center}
+  font-size:.55rem;color:var(--muted);display:block;
+  margin-top:.05rem;font-feature-settings:"tnum"}
+.no-rat{font-size:.62rem;color:#bbb;font-style:italic;text-align:center}
 
-/* Prix */
 .wine-price{
-  font-family:'DM Mono',monospace;font-size:1.05rem;
+  font-family:'DM Mono',monospace;font-size:1.08rem;
   font-weight:700;color:var(--ink);text-align:right;
   white-space:nowrap;font-feature-settings:"tnum"}
-.p-up  {color:#dc2626;font-size:.66rem;font-weight:700;margin-left:2px;vertical-align:middle}
-.p-down{color:#16a34a;font-size:.66rem;font-weight:700;margin-left:2px;vertical-align:middle}
-.p-eq  {color:#9ca3af;font-size:.66rem;margin-left:2px;vertical-align:middle}
+.p-up  {color:#dc2626;font-size:.64rem;font-weight:700;margin-left:2px;vertical-align:middle}
+.p-down{color:#16a34a;font-size:.64rem;font-weight:700;margin-left:2px;vertical-align:middle}
+.p-eq  {color:#9ca3af;font-size:.64rem;margin-left:2px;vertical-align:middle}
 
-/* Score Q/P */
 .score-wrap{text-align:right}
 .score-num{
-  font-family:'DM Mono';font-size:.95rem;color:var(--bx);
-  font-weight:700;font-feature-settings:"tnum"}
+  font-family:'DM Mono';font-size:.98rem;color:var(--bx);
+  font-weight:700;font-feature-settings:"tnum";line-height:1}
 .score-lbl{
-  font-size:.5rem;color:var(--muted);letter-spacing:.06em;
+  font-size:.5rem;color:var(--muted);letter-spacing:.07em;
   text-transform:uppercase;margin-top:.04rem}
 .score-bar{
-  background:rgba(107,26,42,.09);border-radius:4px;
-  height:8px;overflow:hidden;margin-top:6px}
+  background:rgba(107,26,42,.08);border-radius:99px;
+  height:6px;overflow:hidden;margin-top:6px}
 .score-fill{
-  height:100%;border-radius:4px;
-  background:linear-gradient(90deg,var(--bx) 0%,#A03050 45%,var(--gold) 100%)}
+  height:100%;border-radius:99px;
+  background:linear-gradient(90deg,var(--bx) 0%,#9C3050 45%,var(--gold) 100%)}
 
-/* ── Deals ───────────────────────────────────────── */
+/* ═══════════════ DEALS ═══════════════ */
 .deal-card{
-  background:var(--card);border-radius:14px;padding:1rem 1.1rem;
-  margin-bottom:.5rem;border-left:4px solid var(--gold);
-  box-shadow:0 2px 14px rgba(201,168,76,.09);
+  background:var(--card);border-radius:var(--r);padding:1rem 1.1rem;
+  margin-bottom:.45rem;border-left:4px solid var(--gold);
+  box-shadow:0 2px 12px rgba(201,168,76,.08);
   display:flex;align-items:center;gap:.9rem;
-  transition:box-shadow .18s,transform .18s}
+  transition:box-shadow .2s,transform .2s}
 .deal-card:hover{
-  box-shadow:0 8px 26px rgba(201,168,76,.22);
-  transform:translateY(-2px)}
+  box-shadow:0 8px 28px rgba(201,168,76,.2);transform:translateY(-2px)}
 .deal-card.d-top{
-  background:linear-gradient(108deg,#FFF9EC,#FFFFFF);
-  border-left-width:5px}
+  background:linear-gradient(108deg,#FFF9EC,var(--card));border-left-width:5px}
 .deal-score{
   font-family:'DM Mono';font-size:1.4rem;font-weight:900;
   color:var(--bx);line-height:1;text-align:center;
   min-width:52px;font-feature-settings:"tnum"}
 .deal-label{
-  font-size:.53rem;color:var(--muted);text-transform:uppercase;
-  letter-spacing:.06em;margin-top:.1rem}
+  font-size:.52rem;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.07em;margin-top:.1rem}
 .deal-body{flex:1;min-width:0}
 .deal-name{
   font-weight:600;font-size:.9rem;color:var(--ink);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.deal-meta{font-size:.72rem;color:var(--muted);margin-top:.2rem}
+.deal-meta{font-size:.71rem;color:var(--muted);margin-top:.2rem}
 .deal-price{
   font-family:'DM Mono';font-size:1.05rem;font-weight:700;
   color:var(--ink);white-space:nowrap;text-align:right;
   font-feature-settings:"tnum"}
 
-/* ── Onglets ─────────────────────────────────────── */
+/* ═══════════════ ONGLETS ═══════════════ */
 [data-testid="stTabs"] [role="tablist"]{
-  border-bottom:2px solid var(--border);gap:.15rem;padding-bottom:0}
+  border-bottom:2px solid var(--border);gap:.1rem;padding-bottom:0}
 [data-testid="stTabs"] [role="tab"]{
-  font-family:'DM Sans',sans-serif;font-size:.77rem;font-weight:500;
-  letter-spacing:.02em;color:var(--muted);border:none;
-  border-radius:7px 7px 0 0;padding:.4rem .8rem;
-  transition:color .15s,background .15s}
+  font-family:'DM Sans',sans-serif;font-size:.76rem;font-weight:500;
+  letter-spacing:.025em;color:var(--muted);border:none;
+  border-radius:8px 8px 0 0;padding:.45rem .9rem;
+  background:transparent;transition:color .15s,background .15s}
 [data-testid="stTabs"] [role="tab"]:hover{
   color:var(--bx);background:rgba(107,26,42,.04)}
 [data-testid="stTabs"] [aria-selected="true"]{
   color:var(--bx) !important;font-weight:700 !important;
-  background:rgba(107,26,42,.04) !important;
+  background:rgba(107,26,42,.05) !important;
   border-bottom:2.5px solid var(--bx) !important}
 
-/* ── Bouton 🚫 : géré par colonne Streamlit ──────
-   La colonne _c_btn est alignée en bas (flex-end)
-   pour coïncider avec la ligne .wine-links ──────── */
+/* ═══════════════ BOUTON 🚫 ═══════════════ */
 div[data-testid="column"]:has(button[title*="Vivino incorrect"]){
-  display:flex !important;
-  flex-direction:column !important;
-  justify-content:flex-end !important;
-  padding-bottom:.82rem !important;
-  margin-left:-3.8rem !important;
-  z-index:10 !important;
+  display:flex !important;flex-direction:column !important;
+  justify-content:flex-end !important;padding-bottom:.82rem !important;
+  margin-left:-3.8rem !important;z-index:10 !important;
   position:relative !important}
 div[data-testid="column"] button[title*="Vivino incorrect"]{
-  font-size:.6rem !important;
-  padding:2px 6px !important;
-  min-height:0 !important;
-  height:auto !important;
-  line-height:1.5 !important;
+  font-size:.59rem !important;padding:2px 7px !important;
+  min-height:0 !important;height:auto !important;line-height:1.5 !important;
   background:transparent !important;
-  border:1px solid rgba(220,38,38,.22) !important;
-  border-radius:4px !important;
-  color:rgba(220,38,38,.42) !important;
-  font-family:'DM Mono',monospace !important;
-  width:auto !important;
+  border:1px solid rgba(220,38,38,.2) !important;
+  border-radius:20px !important;color:rgba(220,38,38,.38) !important;
+  font-family:'DM Mono',monospace !important;width:auto !important;
   white-space:nowrap !important;
   transition:color .15s,border-color .15s,background .15s !important}
 div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
-  color:#dc2626 !important;
-  border-color:rgba(220,38,38,.55) !important;
+  color:#dc2626 !important;border-color:rgba(220,38,38,.5) !important;
   background:rgba(220,38,38,.05) !important}
 
-/* ── Pagination ──────────────────────────────────── */
+/* ═══════════════ PAGINATION ═══════════════ */
 .page-info{
-  font-size:.72rem;color:var(--muted);
-  font-family:'DM Mono';text-align:center;padding:.4rem}
+  font-size:.71rem;color:var(--muted);
+  font-family:'DM Mono';text-align:center;padding:.35rem}
 
-/* ── Mobile ──────────────────────────────────────── */
+/* ═══════════════ SIDEBAR BRANDING ═══════════════ */
+.sb-brand{
+  padding:.9rem 1rem .7rem;
+  border-bottom:1px solid rgba(201,168,76,.15);
+  margin-bottom:.6rem}
+.sb-brand-title{
+  font-family:'Playfair Display',serif;
+  font-size:1.05rem;font-weight:900;
+  color:#F5E6E8;line-height:1.1;letter-spacing:-.01em}
+.sb-brand-title span{color:var(--gold)}
+.sb-brand-sub{
+  font-size:.62rem;color:rgba(232,208,213,.45);
+  letter-spacing:.1em;text-transform:uppercase;margin-top:.2rem}
+
+/* Titres de section sidebar */
+.sb-section{
+  font-size:.62rem;color:rgba(201,168,76,.7);
+  letter-spacing:.12em;text-transform:uppercase;
+  font-weight:600;margin:.7rem 0 .3rem;
+  padding-bottom:.25rem;
+  border-bottom:1px solid rgba(201,168,76,.12)}
+
+/* Barre de couverture Vivino */
+.cov-wrap{margin:.35rem 0 .55rem}
+.cov-label{
+  display:flex;justify-content:space-between;
+  font-size:.65rem;color:rgba(232,208,213,.7);margin-bottom:.28rem}
+.cov-label strong{color:#E8D0D5}
+.cov-bar{
+  height:5px;background:rgba(255,255,255,.1);
+  border-radius:99px;overflow:hidden}
+.cov-fill{
+  height:100%;border-radius:99px;
+  transition:width .4s ease;
+  background:linear-gradient(90deg,#8B2A3A,var(--gold))}
+.cov-fill.cov-full{background:#16a34a}
+
+/* ═══════════════ COMPTEUR FILTRES ═══════════════ */
+.filter-counter{
+  display:inline-flex;align-items:center;gap:.4rem;
+  background:var(--card);border:1px solid var(--border);
+  border-radius:20px;padding:.25rem .7rem;
+  font-size:.7rem;color:var(--muted);
+  font-family:'DM Mono';margin:.3rem 0 .6rem;
+  box-shadow:0 1px 4px rgba(26,8,16,.05)}
+.filter-counter strong{color:var(--ink);font-size:.78rem}
+.filter-counter .sep{color:var(--border);margin:0 .1rem}
+/* Variante "filtré" — bordure dorée discrète */
+.filter-counter.is-filtered{
+  border-color:rgba(201,168,76,.4);
+  background:rgba(201,168,76,.04)}
+.filter-counter.is-filtered strong{color:var(--bx)}
+
+/* ═══════════════ ÉTAT VIDE ═══════════════ */
+.empty-state{
+  text-align:center;padding:3.5rem 1rem;
+  color:var(--muted)}
+.empty-state-icon{font-size:2.8rem;line-height:1;margin-bottom:.6rem}
+.empty-state-title{
+  font-family:'Playfair Display',serif;
+  font-size:1.15rem;font-weight:700;color:var(--ink);
+  margin-bottom:.4rem}
+.empty-state-sub{font-size:.82rem;line-height:1.55}
+
+/* ═══════════════ SECTION HEADERS ═══════════════ */
+.tab-section{
+  font-family:'Playfair Display',serif;
+  font-size:1.05rem;font-weight:700;color:var(--ink);
+  margin:.1rem 0 .8rem;letter-spacing:-.01em;
+  display:flex;align-items:center;gap:.45rem}
+.tab-section::after{
+  content:'';flex:1;height:1px;
+  background:linear-gradient(90deg,var(--border),transparent);
+  margin-left:.2rem}
+.tab-subsection{
+  font-size:.68rem;font-weight:600;color:var(--muted);
+  letter-spacing:.1em;text-transform:uppercase;
+  margin:.9rem 0 .35rem;
+  display:flex;align-items:center;gap:.4rem}
+.tab-subsection::after{
+  content:'';flex:1;height:1px;background:var(--border)}
+
+/* ═══════════════ DEALS BANNER ═══════════════ */
+.deals-banner{
+  display:inline-flex;align-items:center;gap:.5rem;
+  background:rgba(22,163,74,.07);border:1px solid rgba(22,163,74,.22);
+  border-radius:10px;padding:.45rem .9rem;margin:.2rem 0 .7rem;
+  font-size:.82rem;color:#166534}
+.deals-banner strong{font-size:.9rem}
+.deals-banner-warn{
+  background:rgba(245,158,11,.06);border-color:rgba(245,158,11,.22);
+  color:#92400e}
+
+/* ═══════════════ ALTAIR TRANSPARENT ═══════════════ */
+/* Force les SVG Vega-Lite à fond transparent pour dark mode */
+.vega-embed,.vega-embed canvas,.vega-embed svg{
+  background:transparent !important}
+
+/* ═══════════════ PAGINATION ═══════════════ */
+.pag-wrap{
+  display:flex;align-items:center;justify-content:center;
+  gap:.5rem;margin:.6rem 0 .2rem}
+.pag-info{
+  font-family:'DM Mono';font-size:.72rem;color:var(--muted);
+  padding:0 .4rem}
+
+/* ═══════════════ MOBILE ═══════════════ */
 @media(max-width:640px){
   .wine-card{
     grid-template-columns:1.8rem 1fr;
@@ -379,57 +511,73 @@ div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
     grid-column:1/3;display:flex;align-items:center;
     gap:.6rem;justify-content:flex-start}
   .stars{display:inline}
-  .wine-price{grid-column:1/3;text-align:left;font-size:.95rem}
+  .wine-price{grid-column:1/3;text-align:left}
   .score-wrap{display:none}
   .wine-name{-webkit-line-clamp:3}
 }
 
-/* ── Dark mode ───────────────────────────────────── */
+/* ═══════════════ DARK MODE ═══════════════ */
 @media(prefers-color-scheme:dark){
   :root{
-    --card:#1e1215;--ink:#edd5d8;--muted:#a89090;
-    --border:#3d2530;--sh:0 2px 14px rgba(0,0,0,.35)}
-  .wine-card{border-left-color:#5a2535}
+    --card:#1C1015;--page:#150A0D;--ink:#EDD5DA;--muted:#A89098;
+    --border:#3A2030;--sh:0 2px 12px rgba(0,0,0,.4);
+    --sh-hover:0 8px 28px rgba(0,0,0,.55)}
+  .stApp,[data-testid="stAppViewContainer"]{background:var(--page) !important}
+  [data-testid="stHeader"]{background:var(--page) !important}
+  [data-testid="stMetric"]{background:#1C1015;border-color:#3A2030}
+  [data-testid="stMetricLabel"]{color:var(--muted) !important}
+  [data-testid="stMetricValue"]{color:var(--ink) !important}
+  .wine-card{border-left-color:#5A2535}
   .wine-card.top1{
-    background:linear-gradient(108deg,#2d1b02,#1e1215);
+    background:linear-gradient(108deg,#2C1A02,#1C1015);
     border-left-color:var(--gold)}
   .wine-card.top2{
-    background:linear-gradient(108deg,#1c1c28,#1e1215);
+    background:linear-gradient(108deg,#1B1B26,#1C1015);
     border-left-color:#909090}
   .wine-card.top3{
-    background:linear-gradient(108deg,#221402,#1e1215);
-    border-left-color:#b06030}
-  .wine-card.unavailable{opacity:.3}
+    background:linear-gradient(108deg,#201402,#1C1015);
+    border-left-color:#B06035}
+  .wine-card.unavailable{opacity:.28}
   .wine-name a{color:var(--ink) !important}
   .wine-sub{color:var(--muted)}
-  .badge.b-reg  {background:#1a1438;color:#c4b5fd;border-color:rgba(196,181,253,.22)}
-  .badge.b-top  {background:#3a0e1e;color:#fda4af;border-color:rgba(253,164,175,.22)}
-  .badge.b-stale{background:#222230;color:#9ca3af;border-color:rgba(156,163,175,.18)}
-  .badge.b-nat  {background:#0e2014;color:#86efac;border-color:rgba(134,239,172,.2)}
-  .badge.b-grape{background:#180c2e;color:#c4b5fd;border-color:rgba(196,181,253,.2)}
-  .badge.b-style{background:#081c26;color:#67e8f9;border-color:rgba(103,232,249,.18)}
-  .lnk-lec{color:#93c5fd;border-color:rgba(147,197,253,.28)}
-  .lnk-lec:hover{background:rgba(147,197,253,.08)}
-  .lnk-viv{color:#d8b4fe;border-color:rgba(216,180,254,.28)}
-  .lnk-viv:hover{background:rgba(216,180,254,.08)}
-  .lnk-bad{color:rgba(253,164,175,.4);border-color:rgba(253,164,175,.18)}
-  .lnk-bad:hover{color:#fda4af;border-color:rgba(253,164,175,.5);background:rgba(253,164,175,.06)}
-  .conf-bar{background:#3d2530}
-  .score-bar{background:rgba(255,255,255,.07)}
+  .badge.b-reg  {background:#1A1438;color:#c4b5fd;border-color:rgba(196,181,253,.2)}
+  .badge.b-top  {background:#38101E;color:#fda4af;border-color:rgba(253,164,175,.2)}
+  .badge.b-stale{background:#20202E;color:#9ca3af;border-color:rgba(156,163,175,.16)}
+  .badge.b-nat  {background:#0E2014;color:#86efac;border-color:rgba(134,239,172,.18)}
+  .badge.b-grape{background:#160A2C;color:#c4b5fd;border-color:rgba(196,181,253,.18)}
+  .badge.b-style{background:#081C26;color:#67e8f9;border-color:rgba(103,232,249,.16)}
+  .lnk-lec{color:#93c5fd;border-color:rgba(147,197,253,.25)}
+  .lnk-lec:hover{background:rgba(147,197,253,.07)}
+  .lnk-viv{color:#d8b4fe;border-color:rgba(216,180,254,.25)}
+  .lnk-viv:hover{background:rgba(216,180,254,.07)}
+  .conf-bar{background:#3A2030}
+  .score-bar{background:rgba(255,255,255,.06)}
   .deal-card{border-left-color:var(--gold)}
-  .deal-card.d-top{background:linear-gradient(108deg,#2d1b02,#1e1215)}
+  .deal-card.d-top{background:linear-gradient(108deg,#2C1A02,#1C1015)}
   .deal-name,.deal-price{color:var(--ink)}
   .deal-meta{color:var(--muted)}
   [data-testid="stTabs"] [role="tab"]{color:var(--muted)}
   [data-testid="stTabs"] [aria-selected="true"]{
     color:#fda4af !important;border-bottom-color:#fda4af !important;
-    background:rgba(253,164,175,.06) !important}
+    background:rgba(253,164,175,.05) !important}
   div[data-testid="column"] button[title*="Vivino incorrect"]{
-    border-color:rgba(253,164,175,.2) !important;
-    color:rgba(253,164,175,.38) !important}
+    border-color:rgba(253,164,175,.18) !important;
+    color:rgba(253,164,175,.35) !important}
   div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
-    color:#fda4af !important;border-color:rgba(253,164,175,.5) !important;
+    color:#fda4af !important;border-color:rgba(253,164,175,.48) !important;
     background:rgba(253,164,175,.06) !important}
+  /* Altair : fond transparent déjà géré via CSS, textes adaptés */
+  .vega-embed .mark-text text{fill:#EDD5DA !important}
+  /* Deals banner */
+  .deals-banner{background:rgba(22,163,74,.08);border-color:rgba(22,163,74,.2);color:#86efac}
+  .deals-banner-warn{background:rgba(245,158,11,.07);border-color:rgba(245,158,11,.18);color:#fcd34d}
+  /* Section headers */
+  .tab-section{color:var(--ink)}
+  .tab-subsection{color:var(--muted)}
+  .tab-section::after,.tab-subsection::after{background:var(--border)}
+  /* Filter counter */
+  .filter-counter{background:var(--card);border-color:var(--border)}
+  .filter-counter.is-filtered{background:rgba(201,168,76,.06);border-color:rgba(201,168,76,.3)}
 }
 </style>
 """, unsafe_allow_html=True)
@@ -883,10 +1031,15 @@ def load_job_state() -> dict:
 
 
 def save_job_state(state: dict) -> None:
+    """Écriture best-effort : les erreurs sont silencieuses pour ne pas
+    bloquer le thread de scraping si le FS est temporairement indisponible."""
     tmp = JOB_STATE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
-    tmp.replace(JOB_STATE_PATH)
-    _invalidate_mem_cache(JOB_STATE_PATH)
+    try:
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
+        tmp.replace(JOB_STATE_PATH)
+        _invalidate_mem_cache(JOB_STATE_PATH)
+    except Exception:
+        tmp.unlink(missing_ok=True)
 
 
 def _set_job_state(**kwargs) -> None:
@@ -1008,7 +1161,8 @@ def price_trend(ean: str, current_price: float, ph: dict) -> str:
     if not ean: return ""
     h = ph.get(ean, {}).get("history", [])
     if len(h) < 2: return ""
-    prev = h[-2]["price"]
+    prev = h[-2].get("price")
+    if not prev: return ""
     if current_price > prev + 0.05: return "↑"
     if current_price < prev - 0.05: return "↓"
     return "="
@@ -1457,7 +1611,6 @@ _VIVINO_TYPE_TO_SLUG: dict[int, str] = {
 
 
 @lru_cache(maxsize=2048)
-@lru_cache(maxsize=1024)
 def build_query(wine_name: str) -> str:
     """
     Construit la query optimale pour la recherche Vivino.
@@ -2608,7 +2761,7 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
     safe_reg = _html.escape(wine.get("region") or "")
 
     name_html = (f'<a href="{safe_url}" target="_blank" '
-                 f'style="color:#1A0810;text-decoration:none">{name}</a>'
+                 f'style="color:var(--ink);text-decoration:none">{name}</a>'
                  ) if safe_url else name
 
     # Miniature bouteille — position absolue dans .wine-info (classe CSS, pas float)
@@ -2624,7 +2777,7 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
                if not wine.get("available", True) else "")
     mil = ""
     if wine.get("vivino_year") and wine.get("vintage") and wine["vivino_year"] != wine["vintage"]:
-        mil = (f'<div class="wine-sub" style="color:#c17a00">'
+        mil = (f'<div class="wine-sub" style="color:#b87800">'
                f'⚠️ Vivino={wine["vivino_year"]} / Leclerc={wine["vintage"]}</div>')
 
     # Barre de confiance Vivino (couleur selon niveau)
@@ -2691,7 +2844,7 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
         f'<div class="score-lbl">score Q/P</div>'
         f'<div class="score-bar"><div class="score-fill" style="width:{pct:.1f}%"></div></div>'
         f'</div>'
-    ) if score else '<div class="score-wrap" style="color:#ccc;font-size:.72rem;text-align:center">—</div>'
+    ) if score else '<div class="score-wrap" style="color:var(--muted);font-size:.72rem;text-align:center">—</div>'
 
     # Nom + millésime + indispo sur une ligne, badges en dessous
     name_line = (f'<div class="wine-name">{name_html}'
@@ -2764,10 +2917,11 @@ def _make_logger(max_lines: int = 10):
 # APP STREAMLIT
 # ═══════════════════════════════════════════════════════════════════════════
 
-st.markdown('<div class="main-title">Cave <span>Leclerc Blagnac</span> × Vivino</div>',
-            unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Comparateur qualité / prix · Blagnac</div>',
-            unsafe_allow_html=True)
+st.markdown(
+    '<div class="main-title">Cave <span>Leclerc Blagnac</span> × Vivino</div>'
+    '<div class="subtitle">Comparateur qualité / prix · Blagnac</div>'
+    '<hr class="title-rule">',
+    unsafe_allow_html=True)
 
 for k, v in [("wines",[]),("loaded_slug",None),("data_ready",False),
              ("last_live_refresh", 0.0)]:
@@ -2825,40 +2979,63 @@ if _early_job.get("status") in {"running", "queued"}:
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### 🍾 Type de vin")
+    # ── Branding sidebar ──────────────────────────────────────────────
+    st.markdown(
+        '<div class="sb-brand">'
+        '<div class="sb-brand-title">🍷 Cave <span>Leclerc</span></div>'
+        '<div class="sb-brand-sub">Blagnac × Vivino</div>'
+        '</div>',
+        unsafe_allow_html=True)
+
+    st.markdown('<div class="sb-section">🍾 Type de vin</div>', unsafe_allow_html=True)
     wine_label = st.selectbox("Type", list(WINE_TYPES), label_visibility="collapsed")
     slug       = WINE_TYPES[wine_label]
 
-    st.divider()
-    st.markdown("### 🔄 Mise à jour")
+    st.markdown('<div class="sb-section">🔄 Mise à jour</div>', unsafe_allow_html=True)
 
     lc = load_leclerc_cache(slug)
     vc = load_vivino_cache()
 
     if lc:
         n_total = len(lc["wines"])
-        # Fix 16 : réutilise wines de session_state (déjà mergées avec Vivino)
-        # plutôt que de recalculer build_query sur lc["wines"] brutes
         _session_wines = st.session_state.get("wines") or []
         if _session_wines and st.session_state.get("loaded_slug") == slug:
             n_rated   = sum(1 for w in _session_wines if w.get("rating"))
             n_missing = n_total - n_rated
         else:
-            # Fallback : calcul depuis le cache brut si pas encore chargé en session
             n_rated   = sum(1 for w in lc["wines"]
                             if vc.get(build_query(w["name"]), {}).get("rating"))
             n_missing = n_total - n_rated
         cov_pct = int(100 * n_rated / max(n_total, 1))
-        st.caption(f"📦 **Leclerc** : {fmt_age(lc['cached_at'])} · {n_total} vins")
         n_stale = sum(1 for v in vc.values() if v.get("_stale"))
-        stale_txt = f" · ⏳ {n_stale} obsolètes (>{VIVINO_CACHE_TTL_DAYS}j)" if n_stale else ""
-        st.caption(f"🍷 **Vivino** : {n_rated}/{n_total} ({cov_pct}%)"
-                   + (f" · ⚠️ {n_missing} manquants" if n_missing else " · ✅ complet")
-                   + stale_txt)
+        # ── Barre de couverture Vivino ──
+        _cov_cls = "cov-fill cov-full" if cov_pct == 100 else "cov-fill"
+        _stale_note = f" · ⏳ {n_stale} obsolètes" if n_stale else ""
+        _miss_note  = f" · {n_missing} manquants" if n_missing else " · ✅"
+        st.markdown(
+            f'<div class="cov-wrap">'
+            f'<div class="cov-label">'
+            f'<span>📦 Leclerc <strong>{fmt_age(lc["cached_at"])}</strong></span>'
+            f'<span>{n_total} vins</span>'
+            f'</div>'
+            f'<div class="cov-label" style="margin-top:.35rem">'
+            f'<span>🍷 Vivino <strong>{n_rated}/{n_total}</strong>{_miss_note}{_stale_note}</span>'
+            f'<span style="color:rgba(201,168,76,.8)">{cov_pct}%</span>'
+            f'</div>'
+            f'<div class="cov-bar">'
+            f'<div class="{_cov_cls}" style="width:{cov_pct}%"></div>'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True)
     else:
         n_missing = 0
-        st.caption("📦 **Leclerc** : ❌ pas de cache")
-        st.caption("🍷 **Vivino** : —")
+        st.markdown(
+            '<div class="cov-wrap">'
+            '<div class="cov-label"><span>📦 Leclerc</span><span style="color:#dc6060">❌ aucun cache</span></div>'
+            '<div class="cov-label"><span>🍷 Vivino</span><span>—</span></div>'
+            '<div class="cov-bar"><div class="cov-fill" style="width:0%"></div></div>'
+            '</div>',
+            unsafe_allow_html=True)
 
 
 
@@ -2940,7 +3117,10 @@ with st.sidebar:
             st.session_state[err_key] = True
             st.toast(f"❌ Erreur : {job.get('error','inconnue')}", icon="❌")
 
-    st.caption(f"📍 Leclerc Blagnac · magasin {STORE_CODE}")
+    st.markdown(
+        f'<div style="font-size:.6rem;color:rgba(200,168,176,.4);margin:.3rem 0 .1rem;letter-spacing:.05em">'
+        f'📍 Leclerc Blagnac · magasin {STORE_CODE}</div>',
+        unsafe_allow_html=True)
 
     # ── Statut persistance Gist ───────────────────────────────────────────
     if _gist_is_configured():
@@ -2984,8 +3164,7 @@ gist_id      = ""
 ```
 3. Redéploie → le Gist est créé automatiquement
 """)
-    st.divider()
-    st.markdown("### 🔧 Filtres")
+    st.markdown('<div class="sb-section">🔧 Filtres</div>', unsafe_allow_html=True)
 
     # Fix G : la recherche couvre aussi la région
     search = st.text_input("🔍 Recherche (nom ou région)", placeholder="Bordeaux, Guigal, Pomerol…")
@@ -3115,8 +3294,15 @@ if job.get("status") == "done" and job.get("slug") == slug:
 wines = st.session_state.wines
 grapes_filter = grapes_filter if 'grapes_filter' in dir() else []
 if not wines:
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.info("👈 Ouvrez le menu et cliquez sur **Vérifier disponibilité** pour charger les vins.")
+    st.markdown(
+        '<div class="empty-state">'
+        '<div class="empty-state-icon">🍷</div>'
+        '<div class="empty-state-title">Aucun vin chargé</div>'
+        '<div class="empty-state-sub">'
+        'Ouvrez le menu latéral et cliquez sur<br>'
+        '<strong>Vérifier disponibilité</strong> pour charger le catalogue.'
+        '</div></div>',
+        unsafe_allow_html=True)
     st.stop()
 
 # ── ALERTE PRIX EN BAISSE ─────────────────────────────────────────────────
@@ -3146,36 +3332,46 @@ filtered = [w for w in wines
 
 # ── COMPTEUR filtrés/total ─────────────────────────────────────────────────
 _n_f, _n_t = len(filtered), len(wines)
+_n_dispo_f = sum(1 for w in filtered if w.get("available", True))
 if _n_f < _n_t:
-    _n_dispo_f = sum(1 for w in filtered if w.get("available", True))
-    st.caption(f"🔍 **{_n_f} vins filtrés** sur {_n_t} total · {_n_dispo_f} dispos à Blagnac")
+    _counter_cls = "filter-counter is-filtered"
+    _counter_html = (f'<span class="{_counter_cls}">'
+                     f'🔍 <strong>{_n_f}</strong> filtrés'
+                     f'<span class="sep">·</span>{_n_t} total'
+                     f'<span class="sep">·</span>{_n_dispo_f} 🏪</span>')
 else:
-    _n_dispo_f = sum(1 for w in filtered if w.get("available", True))
-    st.caption(f"📋 **{_n_t} vins** · {_n_dispo_f} dispos à Blagnac")
+    _counter_html = (f'<span class="filter-counter">'
+                     f'📋 <strong>{_n_t}</strong> vins'
+                     f'<span class="sep">·</span>{_n_dispo_f} dispos 🏪</span>')
+st.markdown(_counter_html, unsafe_allow_html=True)
 
 # ── TRI ───────────────────────────────────────────────────────────────────
 SORTS = {
-    # "Q/P" = Qualité/Prix : note Vivino × log(nb avis) / racine(prix)
-    # Favorise les vins à la fois bien notés, populaires et abordables
     "💰 Q/P":    lambda x: (-(x.get("score") or 0),   -(x.get("rating") or 0)),
     "⭐ Note":    lambda x: (-(x.get("rating") or 0),   -(x.get("score") or 0)),
     "💶 Prix ↑": lambda x: ( (x.get("price") or 9999), -(x.get("score") or 0)),
     "💶 Prix ↓": lambda x: (-(x.get("price") or 0),    -(x.get("score") or 0)),
 }
-sort_cols = st.columns(len(SORTS))
+_sort_help = {
+    "💰 Q/P":    "Qualité/Prix : note × popularité ÷ prix.",
+    "⭐ Note":    "Note Vivino décroissante.",
+    "💶 Prix ↑": "Du moins cher au plus cher.",
+    "💶 Prix ↓": "Du plus cher au moins cher.",
+}
 if "sort_key" not in st.session_state: st.session_state.sort_key = "💰 Q/P"
-for col, (label, fn) in zip(sort_cols, SORTS.items()):
+_sc1, _sc2, _sc3, _sc4, _sc_lbl = st.columns([1,1,1,1,1.4])
+with _sc_lbl:
+    st.markdown(
+        f'<div style="font-size:.62rem;color:var(--muted);text-align:right;'
+        f'padding-top:.45rem;letter-spacing:.04em">'
+        f'Tri : <strong style="color:var(--ink)">{st.session_state.sort_key}</strong></div>',
+        unsafe_allow_html=True)
+for col, (label, fn) in zip([_sc1, _sc2, _sc3, _sc4], SORTS.items()):
     with col:
         active = st.session_state.sort_key == label
-        help_txt = {
-            "💰 Q/P":    "Qualité/Prix : note × popularité ÷ prix. Le meilleur rapport global.",
-            "⭐ Note":    "Trier par note Vivino décroissante.",
-            "💶 Prix ↑": "Du moins cher au plus cher.",
-            "💶 Prix ↓": "Du plus cher au moins cher.",
-        }.get(label, "")
         if st.button(label, key=f"sort_{label}",
                      type="primary" if active else "secondary",
-                     use_container_width=True, help=help_txt):
+                     use_container_width=True, help=_sort_help.get(label,"")):
             st.session_state.sort_key = label
 filtered.sort(key=SORTS.get(st.session_state.sort_key, SORTS["💰 Q/P"]))
 
@@ -3239,7 +3435,10 @@ with tab_rank:
     if n_bad: st.warning(f"⚠️ {n_bad} vins avec millésime différent Leclerc / Vivino (bordure orange).")
     st.divider()
     if not filtered:
-        st.info("Aucun vin ne correspond aux filtres.")
+        st.markdown('<div class="empty-state"><div class="empty-state-icon">🔍</div>'
+            '<div class="empty-state-title">Aucun résultat</div>'
+            '<div class="empty-state-sub">Aucun vin ne correspond aux filtres actifs.</div></div>',
+            unsafe_allow_html=True)
     else:
         max_score = max((w.get("score") or 0 for w in filtered), default=1)
 
@@ -3302,7 +3501,7 @@ with tab_rank:
                                 _q = build_query(w["name"])
                                 # Récupérer le titre Vivino depuis le cache avant suppression
                                 _old = _vc_live.get(_q, {})
-                                _old_title = _old.get("vivino_url", "")
+                                _old_title = _old.get("vivino_name") or _old.get("vivino_url", "")
                                 # Enregistrer le rejet avec raison
                                 save_vivino_rejection(
                                     wine_name=w["name"],
@@ -3320,6 +3519,11 @@ with tab_rank:
                                     "locked": True, "cached_at": time.time(),
                                 }
                                 save_vivino_cache(_vc_live)
+                                # Recharger session_state.wines pour refléter le rejet
+                                # immédiatement (sans attendre btn_stock)
+                                _wines_fresh = load_wines_from_cache(slug)
+                                if _wines_fresh:
+                                    st.session_state.wines = _wines_fresh
                                 st.session_state.pop(_reject_key, None)
                                 _rlab = REJECTION_REASONS[_reason]
                                 st.toast(f"✅ Rejet enregistré · {_rlab}", icon="🚫")
@@ -3357,7 +3561,7 @@ with tab_rank:
 
 # ── BONNES AFFAIRES ───────────────────────────────────────────────────────
 with tab_deals:
-    st.markdown("#### 💡 Bonnes Affaires")
+    st.markdown('<div class="tab-section">💡 Bonnes Affaires</div>', unsafe_allow_html=True)
 
     # Critères éditables
     _dc1, _dc2, _dc3 = st.columns(3)
@@ -3367,7 +3571,8 @@ with tab_deals:
             value=4.0, format_func=lambda x: f"≥ {x:.1f}★")
     with _dc2:
         _max_price_opt = min(int((max((w.get("price") or 0) for w in filtered) if filtered else 50) + 5), 100)
-        deal_max_price = st.slider("Prix max (€)", 5, _max_price_opt, 15, step=5)
+        _deal_price_default = min(15, _max_price_opt)  # clamp : value ne peut pas dépasser max
+        deal_max_price = st.slider("Prix max (€)", 5, _max_price_opt, _deal_price_default, step=5)
     with _dc3:
         deal_min_avis = st.select_slider(
             "Avis min", options=[50, 100, 200, 500, 1000, 2000, 5000],
@@ -3389,12 +3594,18 @@ with tab_deals:
                                and w.get("available", True)],
             key=lambda x: -(x.get("score") or 0))
         if deals_soft:
-            st.info(f"Aucun vin avec ces critères stricts. {len(deals_soft)} résultats avec critères assouplis :")
+            st.markdown(
+                f'<div class="deals-banner deals-banner-warn">⚠️ Critères assouplis — <strong>{len(deals_soft)}</strong> résultats</div>',
+                unsafe_allow_html=True)
             deals = deals_soft[:20]
         else:
-            st.info("Aucune bonne affaire identifiée. Lancez **🔎 Compléter les manquants** pour enrichir les données.")
+            st.markdown(
+                '<div class="deals-banner deals-banner-warn">😕 Aucune bonne affaire — lancez <strong>🔎 Compléter les manquants</strong> pour enrichir les données.</div>',
+                unsafe_allow_html=True)
     else:
-        st.success(f"🎉 {len(deals)} bonne(s) affaire(s) !")
+        st.markdown(
+            f'<div class="deals-banner">🎉 <strong>{len(deals)}</strong> bonne(s) affaire(s) trouvée(s)</div>',
+            unsafe_allow_html=True)
 
     for idx_d, w in enumerate(deals[:30]):
         score   = w.get("score") or 0
@@ -3447,9 +3658,13 @@ with tab_stats:
     import altair as alt
 
     if not filtered:
-        st.info("Aucun vin à analyser avec les filtres actuels.")
+        st.markdown(
+            '<div class="empty-state"><div class="empty-state-icon">📊</div>'
+            '<div class="empty-state-title">Aucun vin à analyser</div>'
+            '<div class="empty-state-sub">Ajustez les filtres pour voir les statistiques.</div></div>',
+            unsafe_allow_html=True)
     else:
-        st.markdown("#### 📊 Statistiques — vins filtrés")
+        st.markdown('<div class="tab-section">📊 Statistiques — vins filtrés</div>', unsafe_allow_html=True)
         s1, s2, s3, s4 = st.columns(4)
         rated_w  = [w for w in filtered if w.get("rating")]
         priced_w = [w for w in filtered if w.get("price")]
@@ -3473,7 +3688,7 @@ with tab_stats:
 
         # Distribution des notes
         with col_a:
-            st.markdown("**Distribution des notes Vivino**")
+            st.markdown('<div class="tab-subsection">Distribution des notes Vivino</div>', unsafe_allow_html=True)
             df_rat = df_s.dropna(subset=["Note"])
             if not df_rat.empty:
                 cut_result = pd.cut(df_rat["Note"],
@@ -3485,18 +3700,19 @@ with tab_stats:
                     .mark_bar(color="#C9A84C", cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
                     .encode(
                         x=alt.X("Note:O", title=None, sort=None),
-                        y=alt.Y("Nb:Q", title="Nb vins"),
+                        y=alt.Y("Nb:Q", title="Nb vins", axis=alt.Axis(grid=False)),
                         tooltip=["Note:O", "Nb:Q"]
-                    ).properties(height=180)
-                    .configure_view(strokeWidth=0)
-                    .configure_axis(grid=False, labelFont="DM Mono"))
+                    ).properties(height=180, background="transparent")
+                    .configure_view(strokeWidth=0, fill="transparent")
+                    .configure_axis(grid=False, labelFont="DM Mono", labelColor="#8B6B72", titleColor="#8B6B72")
+                    .configure_title(color="#1A0810"))
                 st.altair_chart(chart_rat, use_container_width=True)
             else:
                 st.caption("Aucune note disponible.")
 
         # Distribution des prix
         with col_b:
-            st.markdown("**Distribution des prix**")
+            st.markdown('<div class="tab-subsection">Distribution des prix</div>', unsafe_allow_html=True)
             df_pr = df_s[df_s["Prix"] > 0]
             if not df_pr.empty:
                 price_max = df_pr["Prix"].max()
@@ -3510,11 +3726,12 @@ with tab_stats:
                     .mark_bar(color="#6B1A2A", cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
                     .encode(
                         x=alt.X("Tranche:O", title=None, sort=None),
-                        y=alt.Y("Nb:Q", title="Nb vins"),
+                        y=alt.Y("Nb:Q", title="Nb vins", axis=alt.Axis(grid=False)),
                         tooltip=["Tranche:O", "Nb:Q"]
-                    ).properties(height=180)
-                    .configure_view(strokeWidth=0)
-                    .configure_axis(grid=False, labelFont="DM Mono"))
+                    ).properties(height=180, background="transparent")
+                    .configure_view(strokeWidth=0, fill="transparent")
+                    .configure_axis(grid=False, labelFont="DM Mono", labelColor="#8B6B72", titleColor="#8B6B72")
+                    .configure_title(color="#1A0810"))
                 st.altair_chart(chart_pr, use_container_width=True)
 
         st.divider()
@@ -3522,23 +3739,24 @@ with tab_stats:
 
         # Top régions
         with col_c:
-            st.markdown("**Vins par région**")
+            st.markdown('<div class="tab-subsection">Vins par région</div>', unsafe_allow_html=True)
             reg_counts = df_s["Région"].value_counts().head(10)
             top_reg = pd.DataFrame({"Région": reg_counts.index, "Nb": reg_counts.values})
             chart_reg = (alt.Chart(top_reg)
-                .mark_bar(color="#2563eb", cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
+                .mark_bar(color="#6B1A2A", cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
                 .encode(
                     y=alt.Y("Région:O", sort="-x", title=None),
-                    x=alt.X("Nb:Q", title="Nb vins"),
+                    x=alt.X("Nb:Q", title="Nb vins", axis=alt.Axis(grid=False)),
                     tooltip=["Région:O", "Nb:Q"]
-                ).properties(height=220)
-                .configure_view(strokeWidth=0)
-                .configure_axis(grid=False, labelFont="DM Sans", labelFontSize=11))
+                ).properties(height=220, background="transparent")
+                .configure_view(strokeWidth=0, fill="transparent")
+                .configure_axis(grid=False, labelFont="DM Sans", labelFontSize=11,
+                                labelColor="#8B6B72", titleColor="#8B6B72"))
             st.altair_chart(chart_reg, use_container_width=True)
 
         # Top régions par note moyenne (interactif)
         with col_d:
-            st.markdown("**Note moyenne par région**")
+            st.markdown('<div class="tab-subsection">Note moyenne par région</div>', unsafe_allow_html=True)
             df_rg = df_s.dropna(subset=["Note"])
             if not df_rg.empty:
                 reg_stats = (df_rg.groupby("Région")
@@ -3553,7 +3771,9 @@ with tab_stats:
                     .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
                     .encode(
                         y=alt.Y("Étiquette:O", sort="-x", title=None),
-                        x=alt.X("Note_moy:Q", title="Note moy.", scale=alt.Scale(domain=[3.0, 5.0])),
+                        x=alt.X("Note_moy:Q", title="Note moy.",
+                                scale=alt.Scale(domain=[3.0, 5.0]),
+                                axis=alt.Axis(grid=False)),
                         color=alt.Color("Note_moy:Q",
                             scale=alt.Scale(scheme="goldred", domain=[3.5, 4.5]),
                             legend=None),
@@ -3562,9 +3782,10 @@ with tab_stats:
                             alt.Tooltip("Note_moy:Q", format=".2f", title="Note moy."),
                             alt.Tooltip("Nb:Q", title="Nb vins notés"),
                         ]
-                    ).properties(height=220)
-                    .configure_view(strokeWidth=0)
-                    .configure_axis(grid=False, labelFont="DM Sans", labelFontSize=11))
+                    ).properties(height=220, background="transparent")
+                    .configure_view(strokeWidth=0, fill="transparent")
+                    .configure_axis(grid=False, labelFont="DM Sans", labelFontSize=11,
+                                    labelColor="#8B6B72", titleColor="#8B6B72"))
                 st.altair_chart(chart_rg, use_container_width=True)
             else:
                 st.caption("Données insuffisantes.")
@@ -3575,7 +3796,7 @@ with tab_stats:
         n_eq   = (df_s["Tendance"] == "=").sum()
         if n_up + n_down + n_eq > 0:
             st.divider()
-            st.markdown("**Tendances de prix**")
+            st.markdown('<div class="tab-subsection">Tendances de prix</div>', unsafe_allow_html=True)
             tc1, tc2, tc3 = st.columns(3)
             tc1.metric("📉 En baisse", n_down, delta=None)
             tc2.metric("📈 En hausse", n_up, delta=None)
@@ -3584,14 +3805,14 @@ with tab_stats:
 
 # ── DONNÉES ───────────────────────────────────────────────────────────────
 with tab_data:
-    st.markdown("#### Tous les vins chargés")
+    st.markdown('<div class="tab-section">🗂️ Tous les vins chargés</div>', unsafe_allow_html=True)
     # Fix 5 : calculé une fois ici, réutilisé dans tab_export
     df_wines = _make_wines_df(wines)
     st.dataframe(df_wines, use_container_width=True, hide_index=True, height=450,
                  column_config=_DF_COL_CONFIG)
 
     st.divider()
-    st.markdown("#### 🗂️ Cache Vivino")
+    st.markdown('<div class="tab-section">🍷 Cache Vivino</div>', unsafe_allow_html=True)
     # Fix L : vc déjà chargé en sidebar (cache mémoire TTL 2s) — pas de 2e lecture disque
     vc_now = vc
     n_ok   = sum(1 for v in vc_now.values() if v.get("rating"))
@@ -3614,7 +3835,7 @@ with tab_data:
                        "Note":  st.column_config.NumberColumn(format="%.1f")})
 
     st.divider()
-    st.markdown("#### 🛠️ Correction manuelle Vivino")
+    st.markdown('<div class="tab-section">🛠️ Correction manuelle</div>', unsafe_allow_html=True)
     names = sorted({w["name"] for w in wines})
     if names:
         selected_name = st.selectbox("Vin à corriger", names, key="manual_vivino_name")
@@ -3688,7 +3909,7 @@ with tab_data:
     ph = load_price_history()
     if ph:
         st.divider()
-        st.markdown("#### 📈 Historique des prix")
+        st.markdown('<div class="tab-section">📈 Historique des prix</div>', unsafe_allow_html=True)
         # Construire le DataFrame complet
         rows = []
         for ean, entry in ph.items():
@@ -3748,7 +3969,7 @@ with tab_data:
 # ── EXPORT ────────────────────────────────────────────────────────────────
     # ── Export intégré ──────────────────────────────────────────────────────
     st.divider()
-    st.markdown("#### 📥 Export")
+    st.markdown('<div class="tab-section">📥 Export</div>', unsafe_allow_html=True)
     today = datetime.now().strftime("%Y%m%d")
     col1, col2 = st.columns(2)
     with col1:
@@ -3821,7 +4042,10 @@ if _console_visible:
 with tab_rej:
     _rejs = load_vivino_rejections()
     if not _rejs:
-        st.info("Aucun rejet enregistré. Cliquez sur 🚫 sur une carte pour signaler un lien Vivino incorrect.")
+        st.markdown('<div class="empty-state"><div class="empty-state-icon">🚫</div>'
+        '<div class="empty-state-title">Aucun rejet enregistré</div>'
+        '<div class="empty-state-sub">Cliquez sur 🚫 sur une carte pour signaler un lien Vivino incorrect.</div></div>',
+        unsafe_allow_html=True)
     else:
         # Stats globales
         total_rej = sum(len(v.get("history",[])) for v in _rejs.values())
