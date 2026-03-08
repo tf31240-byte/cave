@@ -148,6 +148,7 @@ st.markdown("""
 
 /* ═══════════════ CHROME STREAMLIT ═══════════════ */
 .stApp,[data-testid="stAppViewContainer"]{background:var(--page) !important}
+.stApp,.block-container{overflow-x:hidden !important;max-width:100% !important}
 [data-testid="stHeader"]{background:var(--page) !important}
 footer{display:none !important}
 #MainMenu{display:none !important}
@@ -189,8 +190,10 @@ footer{display:none !important}
 /* ═══════════════ EN-TÊTE PAGE ═══════════════ */
 .main-title{
   font-family:'Playfair Display',serif;
-  font-size:clamp(1.7rem,4vw,2.6rem);
-  font-weight:900;color:var(--ink);line-height:1.05;letter-spacing:-.02em}
+  font-size:clamp(1.3rem,3vw,2.2rem);
+  font-weight:900;color:var(--ink);line-height:1.1;letter-spacing:-.02em;
+  word-break:break-word;overflow-wrap:break-word;
+  max-width:100%;white-space:normal}
 .main-title span{color:var(--gold)}
 .subtitle{
   color:var(--muted);font-size:.74rem;letter-spacing:.14em;
@@ -2918,8 +2921,8 @@ def _make_logger(max_lines: int = 10):
 # ═══════════════════════════════════════════════════════════════════════════
 
 st.markdown(
-    '<div class="main-title">Cave <span>Leclerc Blagnac</span> × Vivino</div>'
-    '<div class="subtitle">Comparateur qualité / prix · Blagnac</div>'
+    '<div class="main-title">Cave <span>Leclerc</span> Blagnac</div>'
+    '<div class="subtitle">Qualité / prix · Vivino · Blagnac</div>'
     '<hr class="title-rule">',
     unsafe_allow_html=True)
 
@@ -3359,13 +3362,7 @@ _sort_help = {
     "💶 Prix ↓": "Du plus cher au moins cher.",
 }
 if "sort_key" not in st.session_state: st.session_state.sort_key = "💰 Q/P"
-_sc1, _sc2, _sc3, _sc4, _sc_lbl = st.columns([1,1,1,1,1.4])
-with _sc_lbl:
-    st.markdown(
-        f'<div style="font-size:.62rem;color:var(--muted);text-align:right;'
-        f'padding-top:.45rem;letter-spacing:.04em">'
-        f'Tri : <strong style="color:var(--ink)">{st.session_state.sort_key}</strong></div>',
-        unsafe_allow_html=True)
+_sc1, _sc2, _sc3, _sc4 = st.columns(4)
 for col, (label, fn) in zip([_sc1, _sc2, _sc3, _sc4], SORTS.items()):
     with col:
         active = st.session_state.sort_key == label
