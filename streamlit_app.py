@@ -134,140 +134,303 @@ st.set_page_config(
 # ═══════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Mono&family=DM+Sans:wght@300;400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,700&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
 
+/* ── Variables globales ─────────────────────────── */
+:root{
+  --bx:#6B1A2A;--gold:#C9A84C;--ink:#1A0810;
+  --muted:#8B6B72;--border:#EDE4E8;
+  --card:#ffffff;--sh:0 1px 4px rgba(26,8,16,.05),0 4px 16px rgba(26,8,16,.07);
+}
+
+/* ── Base ───────────────────────────────────────── */
 html,body,[class*="css"]{font-family:'DM Sans',sans-serif}
-.main-title{font-family:'Playfair Display',serif;font-size:clamp(1.4rem,4vw,2.2rem);
-  font-weight:900;color:#1A0810;line-height:1.1}
-.main-title span{color:#C9A84C}
-.subtitle{color:#8B6B72;font-size:.82rem;letter-spacing:.08em;text-transform:uppercase}
 
+/* ── En-tête ────────────────────────────────────── */
+.main-title{
+  font-family:'Playfair Display',serif;
+  font-size:clamp(1.6rem,4vw,2.4rem);
+  font-weight:900;color:var(--ink);line-height:1.05;letter-spacing:-.01em}
+.main-title span{color:var(--gold)}
+.subtitle{color:var(--muted);font-size:.78rem;letter-spacing:.12em;
+  text-transform:uppercase;margin-top:.2rem}
+
+/* ── Carte vin ──────────────────────────────────── */
 .wine-card{
-  background:white;border-radius:12px;padding:.85rem 1rem;margin-bottom:.45rem;
-  border-left:4px solid #6B1A2A;box-shadow:0 2px 10px rgba(26,8,16,.07);
-  display:grid;grid-template-columns:2.2rem 1fr auto auto auto;
-  align-items:center;gap:.6rem;
-  transition:box-shadow .15s ease, transform .15s ease}
-.wine-card:hover{box-shadow:0 6px 20px rgba(26,8,16,.13);transform:translateY(-1px)}
-.wine-card.top1{border-left-color:#C9A84C;background:linear-gradient(100deg,#fffdf4,#fff)}
-.wine-card.top2{border-left-color:#9C9C9C;background:linear-gradient(100deg,#f9f9f9,#fff)}
-.wine-card.top3{border-left-color:#CD7F32;background:linear-gradient(100deg,#fdf8f3,#fff)}
+  background:var(--card);border-radius:14px;
+  padding:.85rem 1.1rem;margin-bottom:.45rem;
+  border-left:4px solid var(--bx);box-shadow:var(--sh);
+  display:grid;
+  /* colonnes fixes — stable quel que soit le contenu */
+  grid-template-columns:2.2rem 1fr 5.8rem 5.4rem 7rem;
+  align-items:center;gap:.7rem;
+  transition:box-shadow .18s,transform .18s}
+.wine-card:hover{
+  box-shadow:0 6px 24px rgba(26,8,16,.12),0 12px 32px rgba(26,8,16,.05);
+  transform:translateY(-2px)}
+
+/* Podium */
+.wine-card.top1{
+  border-left:5px solid var(--gold);
+  background:linear-gradient(108deg,#FFF9EC 0%,#FFFFFF 52%);
+  box-shadow:0 3px 18px rgba(201,168,76,.16),0 8px 28px rgba(201,168,76,.08)}
+.wine-card.top2{
+  border-left:5px solid #B0B0B0;
+  background:linear-gradient(108deg,#F4F4F6 0%,#FFFFFF 52%)}
+.wine-card.top3{
+  border-left:5px solid #C0723A;
+  background:linear-gradient(108deg,#FBF1E8 0%,#FFFFFF 52%)}
 .wine-card.vintage-warn{border-right:3px solid #f59e0b}
-.wine-card.unavailable{opacity:.38;filter:grayscale(80%)}
+.wine-card.unavailable{opacity:.32;filter:grayscale(65%)}
 .wine-card.stale{border-left-style:dashed}
 
-.wine-rank{font-family:'DM Mono',monospace;font-size:1.2rem;text-align:center}
-.wine-info{min-width:0}
-.wine-name{font-weight:700;font-size:.9rem;color:#1A0810;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.wine-sub{font-size:.7rem;color:#8B6B72;margin-top:.1rem}
-.wine-links{display:flex;gap:.35rem;margin-top:.3rem;flex-wrap:wrap;align-items:center}
-.lnk{font-size:.65rem;text-decoration:none;border-radius:4px;
-  padding:2px 8px;border:1px solid;white-space:nowrap;font-family:'DM Mono';
-  transition:background .12s}
-.lnk-lec{color:#2563eb;border-color:#2563eb}
-.lnk-lec:hover{background:rgba(37,99,235,.08)}
-.lnk-viv{color:#7B2D8B;border-color:#7B2D8B}
-.lnk-viv:hover{background:rgba(123,45,139,.08)}
+/* Rang */
+.wine-rank{
+  font-family:'DM Mono',monospace;font-size:1.2rem;
+  text-align:center;line-height:1;flex-shrink:0}
 
-.wine-rating{text-align:center;min-width:90px}
-.stars{color:#C9A84C;font-size:.9rem;letter-spacing:1px;display:block}
-.r-num{font-family:'DM Mono';font-size:.85rem;font-weight:700;color:#1A0810}
-.r-cnt{font-size:.6rem;color:#8B6B72}
-.no-rat{font-size:.68rem;color:#ccc;font-style:italic;text-align:center;min-width:80px}
+/* Infos ─ colonne centrale */
+.wine-info{min-width:0;position:relative}
+/* image bouteille en absolue top-right dans la colonne infos */
+.wine-bottle{
+  position:absolute;right:0;top:50%;transform:translateY(-50%);
+  width:36px;height:54px;object-fit:contain;
+  border-radius:3px;opacity:.88;pointer-events:none}
+/* quand image présente : padding-right pour ne pas chevaucher le nom */
+.wine-info.has-img{padding-right:46px}
+.wine-name{
+  font-weight:600;font-size:.87rem;color:var(--ink);
+  display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden;line-height:1.4}
+.wine-name a{color:inherit;text-decoration:none}
+.wine-name a:hover{color:var(--bx)}
+.wine-year{
+  color:var(--muted);font-size:.66rem;font-weight:400;
+  margin-left:.3rem;font-style:italic;white-space:nowrap}
+.wine-unavail{font-size:.6rem;color:#dc2626;margin-left:.3rem;white-space:nowrap}
+.wine-sub{font-size:.67rem;color:var(--muted);margin-top:.12rem}
 
-.conf-bar{height:3px;border-radius:2px;margin-top:3px;background:#e5e7eb;overflow:hidden}
+/* Liens + 🚫 sur la même ligne */
+.wine-links{
+  display:flex;gap:.28rem;margin-top:.32rem;
+  flex-wrap:wrap;align-items:center}
+.lnk{
+  font-size:.6rem;text-decoration:none;border-radius:4px;
+  padding:2px 6px;border:1px solid;white-space:nowrap;
+  font-family:'DM Mono';font-weight:500;transition:background .12s,color .12s}
+.lnk-lec{color:#1d4ed8;border-color:rgba(29,78,216,.3)}
+.lnk-lec:hover{background:rgba(29,78,216,.07)}
+.lnk-viv{color:#6b21a8;border-color:rgba(107,33,168,.3)}
+.lnk-viv:hover{background:rgba(107,33,168,.07)}
+/* 🚫 — même style lnk mais rouge discret */
+.lnk-bad{
+  color:rgba(220,38,38,.45);border-color:rgba(220,38,38,.2);
+  cursor:pointer;background:transparent}
+.lnk-bad:hover{
+  color:#dc2626;border-color:rgba(220,38,38,.55);
+  background:rgba(220,38,38,.05)}
+
+/* Barre confiance */
+.conf-bar{
+  height:3px;border-radius:2px;margin-top:5px;
+  background:var(--border);overflow:hidden}
 .conf-fill{height:100%;border-radius:2px}
 
-.wine-price{font-family:'DM Mono',monospace;font-size:1rem;
-  font-weight:700;color:#1A0810;text-align:right;white-space:nowrap}
-.p-up  {color:#dc2626;font-size:.7rem;font-weight:700;margin-left:3px}
-.p-down{color:#16a34a;font-size:.7rem;font-weight:700;margin-left:3px}
-.p-eq  {color:#9ca3af;font-size:.7rem;margin-left:3px}
+/* Badges */
+.badge{
+  display:inline-block;padding:.1rem .42rem;border-radius:4px;
+  font-size:.58rem;font-family:'DM Mono';font-weight:500;
+  margin-right:.12rem;margin-top:.22rem;letter-spacing:.02em;
+  vertical-align:middle}
+.b-deal {background:rgba(201,168,76,.12);color:#7a5520;border:1px solid rgba(201,168,76,.32)}
+.b-top  {background:rgba(107,26,42,.07);color:#6B1A2A;border:1px solid rgba(107,26,42,.16)}
+.b-reg  {background:rgba(29,78,216,.05);color:#1d4ed8;border:1px solid rgba(29,78,216,.16)}
+.b-stale{background:rgba(245,158,11,.07);color:#92400e;border:1px solid rgba(245,158,11,.22)}
+.b-nat  {background:rgba(22,163,74,.06);color:#166534;border:1px solid rgba(22,163,74,.2)}
+.b-grape{background:rgba(109,40,217,.05);color:#5b21b6;border:1px solid rgba(109,40,217,.16)}
+.b-style{background:rgba(8,145,178,.05);color:#0e7490;border:1px solid rgba(8,145,178,.16)}
+.b-vol  {background:rgba(180,83,9,.06);color:#92400e;border:1px solid rgba(180,83,9,.16)}
 
-.score-wrap{min-width:100px}
-.score-num{font-family:'DM Mono';font-size:.75rem;color:#6B1A2A;font-weight:600}
-.score-lbl{font-size:.55rem;color:#8B6B72;letter-spacing:.04em}
-.score-bar{background:rgba(107,26,42,.1);border-radius:3px;height:5px;
-  overflow:hidden;margin-top:3px}
-.score-fill{height:100%;background:linear-gradient(90deg,#6B1A2A,#C9A84C);border-radius:3px}
+/* Note */
+.wine-rating{text-align:center}
+.stars{
+  color:var(--gold);font-size:.8rem;letter-spacing:.4px;
+  display:block;line-height:1.2}
+.r-num{
+  font-family:'DM Mono';font-size:.92rem;font-weight:700;color:var(--ink);
+  font-feature-settings:"tnum";display:block;margin-top:.08rem}
+.r-cnt{
+  font-size:.56rem;color:var(--muted);display:block;margin-top:.04rem;
+  font-feature-settings:"tnum"}
+.no-rat{font-size:.62rem;color:#ccc;font-style:italic;text-align:center}
 
-.badge{display:inline-block;padding:.1rem .4rem;border-radius:3px;
-  font-size:.58rem;font-family:'DM Mono';margin-right:.15rem;margin-top:.2rem}
-.b-deal{background:rgba(201,168,76,.15);color:#8B6030;border:1px solid rgba(201,168,76,.4)}
-.b-top  {background:rgba(107,26,42,.08);color:#6B1A2A;border:1px solid rgba(107,26,42,.2)}
-.b-reg  {background:rgba(37,99,235,.06);color:#1d4ed8;border:1px solid rgba(37,99,235,.2)}
-.b-stale{background:rgba(245,158,11,.08);color:#92400e;border:1px solid rgba(245,158,11,.3)}
-.b-nat  {background:rgba(22,163,74,.07);color:#15803d;border:1px solid rgba(22,163,74,.25)}
-.b-grape{background:rgba(124,58,237,.06);color:#5b21b6;border:1px solid rgba(124,58,237,.2)}
-.b-style{background:rgba(8,145,178,.06);color:#0e7490;border:1px solid rgba(8,145,178,.2)}
-.b-vol  {background:rgba(180,83,9,.07);color:#92400e;border:1px solid rgba(180,83,9,.2)}
+/* Prix */
+.wine-price{
+  font-family:'DM Mono',monospace;font-size:1.05rem;
+  font-weight:700;color:var(--ink);text-align:right;
+  white-space:nowrap;font-feature-settings:"tnum"}
+.p-up  {color:#dc2626;font-size:.66rem;font-weight:700;margin-left:2px;vertical-align:middle}
+.p-down{color:#16a34a;font-size:.66rem;font-weight:700;margin-left:2px;vertical-align:middle}
+.p-eq  {color:#9ca3af;font-size:.66rem;margin-left:2px;vertical-align:middle}
 
-@media (max-width:640px){
-  .wine-card{grid-template-columns:1.8rem 1fr;grid-template-rows:auto auto auto;gap:.3rem}
-  .wine-rating{grid-column:1/3;display:flex;align-items:center;
-    gap:.6rem;justify-content:flex-start;min-width:0}
+/* Score Q/P */
+.score-wrap{text-align:right}
+.score-num{
+  font-family:'DM Mono';font-size:.95rem;color:var(--bx);
+  font-weight:700;font-feature-settings:"tnum"}
+.score-lbl{
+  font-size:.5rem;color:var(--muted);letter-spacing:.06em;
+  text-transform:uppercase;margin-top:.04rem}
+.score-bar{
+  background:rgba(107,26,42,.09);border-radius:4px;
+  height:8px;overflow:hidden;margin-top:6px}
+.score-fill{
+  height:100%;border-radius:4px;
+  background:linear-gradient(90deg,var(--bx) 0%,#A03050 45%,var(--gold) 100%)}
+
+/* ── Deals ───────────────────────────────────────── */
+.deal-card{
+  background:var(--card);border-radius:14px;padding:1rem 1.1rem;
+  margin-bottom:.5rem;border-left:4px solid var(--gold);
+  box-shadow:0 2px 14px rgba(201,168,76,.09);
+  display:flex;align-items:center;gap:.9rem;
+  transition:box-shadow .18s,transform .18s}
+.deal-card:hover{
+  box-shadow:0 8px 26px rgba(201,168,76,.22);
+  transform:translateY(-2px)}
+.deal-card.d-top{
+  background:linear-gradient(108deg,#FFF9EC,#FFFFFF);
+  border-left-width:5px}
+.deal-score{
+  font-family:'DM Mono';font-size:1.4rem;font-weight:900;
+  color:var(--bx);line-height:1;text-align:center;
+  min-width:52px;font-feature-settings:"tnum"}
+.deal-label{
+  font-size:.53rem;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.06em;margin-top:.1rem}
+.deal-body{flex:1;min-width:0}
+.deal-name{
+  font-weight:600;font-size:.9rem;color:var(--ink);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.deal-meta{font-size:.72rem;color:var(--muted);margin-top:.2rem}
+.deal-price{
+  font-family:'DM Mono';font-size:1.05rem;font-weight:700;
+  color:var(--ink);white-space:nowrap;text-align:right;
+  font-feature-settings:"tnum"}
+
+/* ── Onglets ─────────────────────────────────────── */
+[data-testid="stTabs"] [role="tablist"]{
+  border-bottom:2px solid var(--border);gap:.15rem;padding-bottom:0}
+[data-testid="stTabs"] [role="tab"]{
+  font-family:'DM Sans',sans-serif;font-size:.77rem;font-weight:500;
+  letter-spacing:.02em;color:var(--muted);border:none;
+  border-radius:7px 7px 0 0;padding:.4rem .8rem;
+  transition:color .15s,background .15s}
+[data-testid="stTabs"] [role="tab"]:hover{
+  color:var(--bx);background:rgba(107,26,42,.04)}
+[data-testid="stTabs"] [aria-selected="true"]{
+  color:var(--bx) !important;font-weight:700 !important;
+  background:rgba(107,26,42,.04) !important;
+  border-bottom:2.5px solid var(--bx) !important}
+
+/* ── Bouton 🚫 : géré par colonne Streamlit ──────
+   La colonne _c_btn est alignée en bas (flex-end)
+   pour coïncider avec la ligne .wine-links ──────── */
+div[data-testid="column"]:has(button[title*="Vivino incorrect"]){
+  display:flex !important;
+  flex-direction:column !important;
+  justify-content:flex-end !important;
+  padding-bottom:.82rem !important;
+  margin-left:-3.8rem !important;
+  z-index:10 !important;
+  position:relative !important}
+div[data-testid="column"] button[title*="Vivino incorrect"]{
+  font-size:.6rem !important;
+  padding:2px 6px !important;
+  min-height:0 !important;
+  height:auto !important;
+  line-height:1.5 !important;
+  background:transparent !important;
+  border:1px solid rgba(220,38,38,.22) !important;
+  border-radius:4px !important;
+  color:rgba(220,38,38,.42) !important;
+  font-family:'DM Mono',monospace !important;
+  width:auto !important;
+  white-space:nowrap !important;
+  transition:color .15s,border-color .15s,background .15s !important}
+div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
+  color:#dc2626 !important;
+  border-color:rgba(220,38,38,.55) !important;
+  background:rgba(220,38,38,.05) !important}
+
+/* ── Pagination ──────────────────────────────────── */
+.page-info{
+  font-size:.72rem;color:var(--muted);
+  font-family:'DM Mono';text-align:center;padding:.4rem}
+
+/* ── Mobile ──────────────────────────────────────── */
+@media(max-width:640px){
+  .wine-card{
+    grid-template-columns:1.8rem 1fr;
+    grid-template-rows:auto auto auto;gap:.3rem}
+  .wine-info.has-img{padding-right:0}
+  .wine-bottle{display:none}
+  .wine-rating{
+    grid-column:1/3;display:flex;align-items:center;
+    gap:.6rem;justify-content:flex-start}
   .stars{display:inline}
   .wine-price{grid-column:1/3;text-align:left;font-size:.95rem}
   .score-wrap{display:none}
-  .wine-name{white-space:normal}
+  .wine-name{-webkit-line-clamp:3}
 }
+
+/* ── Dark mode ───────────────────────────────────── */
 @media(prefers-color-scheme:dark){
-  .wine-card{background:#1e1212;border-color:#3d2020;color:#e8d5d5}
-  .wine-card.top1{background:linear-gradient(135deg,#2d1f00,#1c1010)}
-  .wine-card.top2{background:linear-gradient(135deg,#1a1a24,#1c1010)}
-  .wine-card.top3{background:linear-gradient(135deg,#1a2018,#1c1010)}
-  .wine-card.unavailable{opacity:.4}
-  .wine-name,.wine-name a{color:#e8d5d5 !important}
-  .wine-sub{color:#b89898}
-  .badge.b-reg{background:#3d2020;color:#e8c0c0}
-  .badge.b-top{background:#7c2d12;color:#fde8d8}
-  .badge.b-stale{background:#374151;color:#9ca3af}
-  .lnk-lec{background:#7c1d1d;color:#fde8d8}
-  .lnk-viv{background:#1d3d7c;color:#d8e8fd}
-  .conf-bar{background:#3d2020}
-  .score-bar-bg{background:#3d2020}
-  .deal-card{background:#1e1212;border-color:#c9a84c}
-  .deal-card.d-top{background:linear-gradient(100deg,#2a2000,#1e1212)}
+  :root{
+    --card:#1e1215;--ink:#edd5d8;--muted:#a89090;
+    --border:#3d2530;--sh:0 2px 14px rgba(0,0,0,.35)}
+  .wine-card{border-left-color:#5a2535}
+  .wine-card.top1{
+    background:linear-gradient(108deg,#2d1b02,#1e1215);
+    border-left-color:var(--gold)}
+  .wine-card.top2{
+    background:linear-gradient(108deg,#1c1c28,#1e1215);
+    border-left-color:#909090}
+  .wine-card.top3{
+    background:linear-gradient(108deg,#221402,#1e1215);
+    border-left-color:#b06030}
+  .wine-card.unavailable{opacity:.3}
+  .wine-name a{color:var(--ink) !important}
+  .wine-sub{color:var(--muted)}
+  .badge.b-reg  {background:#1a1438;color:#c4b5fd;border-color:rgba(196,181,253,.22)}
+  .badge.b-top  {background:#3a0e1e;color:#fda4af;border-color:rgba(253,164,175,.22)}
+  .badge.b-stale{background:#222230;color:#9ca3af;border-color:rgba(156,163,175,.18)}
+  .badge.b-nat  {background:#0e2014;color:#86efac;border-color:rgba(134,239,172,.2)}
+  .badge.b-grape{background:#180c2e;color:#c4b5fd;border-color:rgba(196,181,253,.2)}
+  .badge.b-style{background:#081c26;color:#67e8f9;border-color:rgba(103,232,249,.18)}
+  .lnk-lec{color:#93c5fd;border-color:rgba(147,197,253,.28)}
+  .lnk-lec:hover{background:rgba(147,197,253,.08)}
+  .lnk-viv{color:#d8b4fe;border-color:rgba(216,180,254,.28)}
+  .lnk-viv:hover{background:rgba(216,180,254,.08)}
+  .lnk-bad{color:rgba(253,164,175,.4);border-color:rgba(253,164,175,.18)}
+  .lnk-bad:hover{color:#fda4af;border-color:rgba(253,164,175,.5);background:rgba(253,164,175,.06)}
+  .conf-bar{background:#3d2530}
+  .score-bar{background:rgba(255,255,255,.07)}
+  .deal-card{border-left-color:var(--gold)}
+  .deal-card.d-top{background:linear-gradient(108deg,#2d1b02,#1e1215)}
+  .deal-name,.deal-price{color:var(--ink)}
+  .deal-meta{color:var(--muted)}
+  [data-testid="stTabs"] [role="tab"]{color:var(--muted)}
+  [data-testid="stTabs"] [aria-selected="true"]{
+    color:#fda4af !important;border-bottom-color:#fda4af !important;
+    background:rgba(253,164,175,.06) !important}
+  div[data-testid="column"] button[title*="Vivino incorrect"]{
+    border-color:rgba(253,164,175,.2) !important;
+    color:rgba(253,164,175,.38) !important}
+  div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
+    color:#fda4af !important;border-color:rgba(253,164,175,.5) !important;
+    background:rgba(253,164,175,.06) !important}
 }
-
-/* Deals podium */
-.deal-card{background:white;border-radius:12px;padding:1rem 1.1rem;
-  margin-bottom:.5rem;border-left:4px solid #C9A84C;
-  box-shadow:0 2px 12px rgba(201,168,76,.12);
-  display:flex;align-items:center;gap:1rem;
-  transition:box-shadow .15s,transform .15s}
-.deal-card:hover{box-shadow:0 6px 20px rgba(201,168,76,.22);transform:translateY(-1px)}
-.deal-card.d-top{background:linear-gradient(100deg,#fffdf4,#fff);border-left-width:5px}
-.deal-score{font-family:'DM Mono';font-size:1.35rem;font-weight:900;
-  color:#6B1A2A;line-height:1;text-align:center;min-width:52px}
-.deal-label{font-size:.58rem;color:#8B6B72;text-transform:uppercase;letter-spacing:.05em}
-.deal-body{flex:1;min-width:0}
-.deal-name{font-weight:700;font-size:.92rem;color:#1A0810;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.deal-meta{font-size:.73rem;color:#8B6B72;margin-top:.2rem}
-.deal-price{font-family:'DM Mono';font-size:1.05rem;font-weight:700;
-  color:#1A0810;white-space:nowrap;text-align:right}
-
-/* Bouton 🚫 — petit rond flottant directement sur la carte */
-.bad-viv-wrap button,
-div[data-testid="column"] button[kind="secondary"][title*="bad_viv"],
-div[data-testid="column"] button[data-testid="baseButton-secondary"]{
-  width:1.45rem !important;height:1.45rem !important;
-  min-height:0 !important;padding:0 !important;
-  border-radius:50% !important;font-size:.68rem !important;
-  background:rgba(220,38,38,.06) !important;
-  border:1px solid rgba(220,38,38,.2) !important;
-  color:#dc2626 !important;line-height:1 !important;
-  opacity:.3;transition:opacity .15s,transform .15s
-}
-div[data-testid="column"] button[data-testid="baseButton-secondary"]:hover{
-  opacity:1 !important;transform:scale(1.2)
-}
-
-/* Pagination */
-.page-info{font-size:.75rem;color:#8B6B72;font-family:'DM Mono';
-  text-align:center;padding:.4rem}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1294,6 +1457,7 @@ _VIVINO_TYPE_TO_SLUG: dict[int, str] = {
 
 
 @lru_cache(maxsize=2048)
+@lru_cache(maxsize=1024)
 def build_query(wine_name: str) -> str:
     """
     Construit la query optimale pour la recherche Vivino.
@@ -2447,19 +2611,16 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
                  f'style="color:#1A0810;text-decoration:none">{name}</a>'
                  ) if safe_url else name
 
-    # Miniature bouteille (champ image scrappé depuis Leclerc)
+    # Miniature bouteille — position absolue dans .wine-info (classe CSS, pas float)
     safe_img = _html.escape(wine.get("image") or "")
-    _none = 'none'
     img_html = (
-        f'<img src="{safe_img}" alt="" '
-        f'style="width:38px;height:56px;object-fit:contain;'
-        f'float:right;margin:0 0 4px 8px;border-radius:3px;'
-        f'opacity:.92" loading="lazy" '
-        f'onerror="this.style.display=\"{_none}\"" />'
+        f'<img src="{safe_img}" alt="" class="wine-bottle" loading="lazy" '
+        f'onerror="this.remove()" />'
     ) if safe_img else ""
-    yr = (f' <span style="color:#8B6B72;font-size:.68rem;font-weight:400">'
-          f'{wine["vintage"]}</span>') if wine.get("vintage") else ""
-    unavail = (' <span style="font-size:.62rem;color:#dc2626">⛔ indispo</span>'
+    info_cls = "wine-info has-img" if safe_img else "wine-info"
+    yr      = (f'<span class="wine-year">{wine["vintage"]}</span>'
+               ) if wine.get("vintage") else ""
+    unavail = ('<span class="wine-unavail">⛔</span>'
                if not wine.get("available", True) else "")
     mil = ""
     if wine.get("vivino_year") and wine.get("vintage") and wine["vivino_year"] != wine["vintage"]:
@@ -2480,6 +2641,8 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
         links.append(f'<a href="{safe_url}" target="_blank" class="lnk lnk-lec">🛒 Leclerc</a>')
     if safe_viv:
         links.append(f'<a href="{safe_viv}" target="_blank" class="lnk lnk-viv">🍷 Vivino</a>')
+    # 🚫 placeholder visuel dans les liens — le vrai bouton Streamlit est dans _c_btn
+    # (aligné en bas par CSS pour coïncider visuellement avec cette ligne)
     links_html = (f'<div class="wine-links">' + "".join(links) + conf_html + "</div>") if links or conf_html else ""
 
     score  = wine.get("score") or 0
@@ -2530,11 +2693,16 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
         f'</div>'
     ) if score else '<div class="score-wrap" style="color:#ccc;font-size:.72rem;text-align:center">—</div>'
 
+    # Nom + millésime + indispo sur une ligne, badges en dessous
+    name_line = (f'<div class="wine-name">{name_html}'
+                 + (f' {yr}' if yr else '')
+                 + (f' {unavail}' if unavail else '')
+                 + '</div>')
     return (f'<div class="wine-card {cls}">'
             f'<div class="wine-rank">{icon}</div>'
-            f'<div class="wine-info">'
+            f'<div class="{info_cls}">'
             f'{img_html}'
-            f'<div class="wine-name">{name_html}{yr}{unavail}</div>'
+            f'{name_line}'
             f'{mil}{links_html}<div>{badges}</div>'
             f'</div>'
             f'{rating_col}'
@@ -2976,43 +3144,73 @@ filtered = [w for w in wines
     and (not regions_filter or w.get("region","") in regions_filter)
     and (not grapes_filter or any(g in (w.get("grapes") or []) for g in grapes_filter))]
 
+# ── COMPTEUR filtrés/total ─────────────────────────────────────────────────
+_n_f, _n_t = len(filtered), len(wines)
+if _n_f < _n_t:
+    _n_dispo_f = sum(1 for w in filtered if w.get("available", True))
+    st.caption(f"🔍 **{_n_f} vins filtrés** sur {_n_t} total · {_n_dispo_f} dispos à Blagnac")
+else:
+    _n_dispo_f = sum(1 for w in filtered if w.get("available", True))
+    st.caption(f"📋 **{_n_t} vins** · {_n_dispo_f} dispos à Blagnac")
+
 # ── TRI ───────────────────────────────────────────────────────────────────
 SORTS = {
-    # Fix 9 : clé de tri secondaire pour éviter que les vins sans note/score
-    # remontent en tête (ex: tri "Note" avec vins non notés = 0 → dessous)
-    "🏆 Score":   lambda x: (-(x.get("score") or 0),   -(x.get("rating") or 0)),
+    # "Q/P" = Qualité/Prix : note Vivino × log(nb avis) / racine(prix)
+    # Favorise les vins à la fois bien notés, populaires et abordables
+    "💰 Q/P":    lambda x: (-(x.get("score") or 0),   -(x.get("rating") or 0)),
     "⭐ Note":    lambda x: (-(x.get("rating") or 0),   -(x.get("score") or 0)),
     "💶 Prix ↑": lambda x: ( (x.get("price") or 9999), -(x.get("score") or 0)),
     "💶 Prix ↓": lambda x: (-(x.get("price") or 0),    -(x.get("score") or 0)),
 }
 sort_cols = st.columns(len(SORTS))
-if "sort_key" not in st.session_state: st.session_state.sort_key = "🏆 Score"
-for col, (label, _) in zip(sort_cols, SORTS.items()):
+if "sort_key" not in st.session_state: st.session_state.sort_key = "💰 Q/P"
+for col, (label, fn) in zip(sort_cols, SORTS.items()):
     with col:
         active = st.session_state.sort_key == label
+        help_txt = {
+            "💰 Q/P":    "Qualité/Prix : note × popularité ÷ prix. Le meilleur rapport global.",
+            "⭐ Note":    "Trier par note Vivino décroissante.",
+            "💶 Prix ↑": "Du moins cher au plus cher.",
+            "💶 Prix ↓": "Du plus cher au moins cher.",
+        }.get(label, "")
         if st.button(label, key=f"sort_{label}",
                      type="primary" if active else "secondary",
-                     use_container_width=True):
+                     use_container_width=True, help=help_txt):
             st.session_state.sort_key = label
-filtered.sort(key=SORTS.get(st.session_state.sort_key, SORTS["🏆 Score"]))
+filtered.sort(key=SORTS.get(st.session_state.sort_key, SORTS["💰 Q/P"]))
 
 # ── ONGLETS ───────────────────────────────────────────────────────────────
-tab_rank, tab_deals, tab_stats, tab_data, tab_export, tab_rej = st.tabs(
-    ["🏅 Classement", "💡 Bonnes Affaires", "📊 Stats", "🗂️ Données & Cache", "📥 Export", "🚫 Rejets Vivino"])
+tab_rank, tab_deals, tab_stats, tab_data, tab_rej = st.tabs(
+    ["🏅 Classement", "💡 Bonnes Affaires", "📊 Stats", "🗂️ Données & Export", "🚫 Rejets Vivino"])
 
 # ── CLASSEMENT ────────────────────────────────────────────────────────────
 with tab_rank:
-    c1,c2,c3,c4,c5 = st.columns(5)
     prices = [w["price"] for w in filtered if w.get("price")]
     rated  = [w["rating"] for w in filtered if w.get("rating")]
     best   = max(filtered, key=lambda x: x.get("score") or 0, default=None)
-    n_rated_fil = sum(1 for w in filtered if w.get("rating"))
-    with c1: st.metric("🍷 Vins", f"{len(filtered)}" + (f"/{len(wines)}" if len(filtered)!=len(wines) else ""))
-    with c2: st.metric("💶 Prix moy.", f"{sum(prices)/len(prices):.2f} €".replace(".",",") if prices else "—")
-    with c3: st.metric("⭐ Note moy.", f"★ {sum(rated)/len(rated):.2f}" if rated else "—")
-    with c4: st.metric("🏆 Meilleur score", f"{best['score']:.2f}" if best and best.get("score") else "—")
-    with c5: st.metric("📊 Couverts Vivino", f"{n_rated_fil}/{len(filtered)}" if filtered else "—",
-                       delta=None if n_rated_fil==len(filtered) else f"{len(filtered)-n_rated_fil} sans note")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if best and best.get("score"):
+            _bname = best["name"][:30] + ("…" if len(best["name"]) > 30 else "")
+            st.metric("🏆 Meilleur Q/P", f"{best['score']:.2f}", help=_bname)
+        else:
+            st.metric("🏆 Meilleur Q/P", "—")
+    with c2:
+        if prices:
+            _pmin, _pmax = min(prices), max(prices)
+            st.metric("💶 Prix", f"{_pmin:.2f} – {_pmax:.2f} €".replace(".", ","),
+                      help=f"Moy. {sum(prices)/len(prices):.2f} €".replace(".", ","))
+        else:
+            st.metric("💶 Prix", "—")
+    with c3:
+        if rated:
+            _rmax = max(rated)
+            _best_rated = next((w for w in filtered if w.get("rating") == _rmax), None)
+            _rlabel = f"★ {_rmax:.2f}"
+            _rhelp  = _best_rated["name"][:40] if _best_rated else ""
+            st.metric("⭐ Meilleure note", _rlabel, help=_rhelp)
+        else:
+            st.metric("⭐ Meilleure note", "—")
 
     n_bad = sum(1 for w in filtered if w.get("vintage_match") is False)
     # Alertes prix en baisse (données réelles de l'historique)
@@ -3067,19 +3265,15 @@ with tab_rank:
             _reject_key = f"reject_mode_{_uid}"
 
             if _has_viv:
+                # Colonne carte + colonne 🚫 (alignée en bas via CSS global)
                 _c_card, _c_btn = st.columns([1, 0.08])
                 with _c_card:
                     st.markdown(wine_card_html(w, start + i + 1, max_score),
                                 unsafe_allow_html=True)
                 with _c_btn:
-                    st.markdown(
-                        f'<style>'
-                        f'div[data-testid="column"]:has(button[title*="{_uid}"])'
-                        f'{{margin-left:-4.5rem;margin-top:.55rem;z-index:10;position:relative}}'
-                        f'</style>',
-                        unsafe_allow_html=True)
+                    # help="Vivino incorrect …" → sélecteur CSS [title*="Vivino incorrect"]
                     if st.button("🚫", key=f"bad_viv_{_uid}",
-                                 help=f"Lien Vivino incorrect ({_uid})"):
+                                 help=f"Vivino incorrect — {w['name'][:40]}"):
                         st.session_state[_reject_key] = True
                         st.rerun()
 
@@ -3164,25 +3358,38 @@ with tab_rank:
 # ── BONNES AFFAIRES ───────────────────────────────────────────────────────
 with tab_deals:
     st.markdown("#### 💡 Bonnes Affaires")
-    st.caption("Critères : note ≥ 4.0 · prix ≤ 15 € · ≥ 500 avis · disponible")
+
+    # Critères éditables
+    _dc1, _dc2, _dc3 = st.columns(3)
+    with _dc1:
+        deal_min_rating = st.select_slider(
+            "Note min ★", options=[3.5, 3.6, 3.7, 3.8, 3.9, 4.0, 4.1, 4.2, 4.3, 4.4, 4.5],
+            value=4.0, format_func=lambda x: f"≥ {x:.1f}★")
+    with _dc2:
+        _max_price_opt = min(int((max((w.get("price") or 0) for w in filtered) if filtered else 50) + 5), 100)
+        deal_max_price = st.slider("Prix max (€)", 5, _max_price_opt, 15, step=5)
+    with _dc3:
+        deal_min_avis = st.select_slider(
+            "Avis min", options=[50, 100, 200, 500, 1000, 2000, 5000],
+            value=500, format_func=lambda x: f"≥ {x:,}".replace(",", " "))
 
     # Fix 4: utilise filtered (respecte région/dispo/prix/recherche de la sidebar)
     deals = sorted(
-        [w for w in filtered if (w.get("rating") or 0) >= 4.0
-                             and (w.get("price") or 999) <= 15
-                             and (w.get("ratings_count") or 0) >= 500
+        [w for w in filtered if (w.get("rating") or 0) >= deal_min_rating
+                             and (w.get("price") or 999) <= deal_max_price
+                             and (w.get("ratings_count") or 0) >= deal_min_avis
                              and w.get("available", True)],
         key=lambda x: -(x.get("score") or 0))
 
     if not deals:
         deals_soft = sorted(
-            [w for w in filtered if (w.get("rating") or 0) >= 3.8
-                               and (w.get("price") or 999) <= 20
-                               and (w.get("ratings_count") or 0) >= 100
+            [w for w in filtered if (w.get("rating") or 0) >= max(3.5, deal_min_rating - 0.2)
+                               and (w.get("price") or 999) <= deal_max_price + 5
+                               and (w.get("ratings_count") or 0) >= max(50, deal_min_avis // 5)
                                and w.get("available", True)],
             key=lambda x: -(x.get("score") or 0))
         if deals_soft:
-            st.info("Aucun vin ne remplit les critères stricts. Résultats assouplis : ≥ 3.8★ · ≤ 20€ · ≥ 100 avis.")
+            st.info(f"Aucun vin avec ces critères stricts. {len(deals_soft)} résultats avec critères assouplis :")
             deals = deals_soft[:20]
         else:
             st.info("Aucune bonne affaire identifiée. Lancez **🔎 Compléter les manquants** pour enrichir les données.")
@@ -3219,6 +3426,21 @@ with tab_deals:
   </div>
   <div class="deal-price"><strong>{(w.get("price") or 0):.2f} €</strong>{trend_h}</div>
 </div>""", unsafe_allow_html=True)
+
+    # Bouton copier la liste
+    if deals:
+        st.divider()
+        _copy_lines = []
+        for i, w in enumerate(deals[:30], 1):
+            price_str = f"{w.get('price', 0):.2f} €".replace(".", ",")
+            rating_str = f"★{w.get('rating', 0):.1f}" if w.get("rating") else ""
+            avis_str = f"{w.get('ratings_count', 0):,}".replace(",", " ") + " avis" if w.get("ratings_count") else ""
+            reg_str = w.get("region", "")
+            parts = [p for p in [rating_str, avis_str, reg_str, price_str] if p]
+            _copy_lines.append(f"{i}. {w['name']} — {' · '.join(parts)}")
+        _copy_text = "\n".join(_copy_lines)
+        st.text_area("📋 Liste à copier", value=_copy_text, height=140,
+                     help="Sélectionne tout (Ctrl+A) puis copie (Ctrl+C)")
 
 # ── STATISTIQUES ─────────────────────────────────────────────────────────
 with tab_stats:
@@ -3314,32 +3536,36 @@ with tab_stats:
                 .configure_axis(grid=False, labelFont="DM Sans", labelFontSize=11))
             st.altair_chart(chart_reg, use_container_width=True)
 
-        # Scatter Note vs Prix (coloré par score)
+        # Top régions par note moyenne (interactif)
         with col_d:
-            st.markdown("**Note vs Prix**")
-            df_sc = df_s.dropna(subset=["Note"]).copy()
-            df_sc = df_sc[df_sc["Prix"] > 0]
-            if not df_sc.empty:
-                chart_sc = (alt.Chart(df_sc)
-                    .mark_circle(opacity=0.7, size=55)
+            st.markdown("**Note moyenne par région**")
+            df_rg = df_s.dropna(subset=["Note"])
+            if not df_rg.empty:
+                reg_stats = (df_rg.groupby("Région")
+                    .agg(Note_moy=("Note","mean"), Nb=("Note","count"))
+                    .reset_index()
+                    .query("Nb >= 2")
+                    .sort_values("Note_moy", ascending=False)
+                    .head(12))
+                reg_stats["Étiquette"] = reg_stats.apply(
+                    lambda r: f"{r['Région']} ({r['Nb']})", axis=1)
+                chart_rg = (alt.Chart(reg_stats)
+                    .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
                     .encode(
-                        x=alt.X("Prix:Q", title="Prix (€)", scale=alt.Scale(zero=False)),
-                        y=alt.Y("Note:Q", title="Note Vivino",
-                                scale=alt.Scale(domain=[2.5, 5.0])),
-                        color=alt.Color("Score:Q",
-                            scale=alt.Scale(scheme="goldred", reverse=False),
-                            legend=alt.Legend(title="Score")),
+                        y=alt.Y("Étiquette:O", sort="-x", title=None),
+                        x=alt.X("Note_moy:Q", title="Note moy.", scale=alt.Scale(domain=[3.0, 5.0])),
+                        color=alt.Color("Note_moy:Q",
+                            scale=alt.Scale(scheme="goldred", domain=[3.5, 4.5]),
+                            legend=None),
                         tooltip=[
-                            alt.Tooltip("Nom:N"),
-                            alt.Tooltip("Note:Q", format=".1f"),
-                            alt.Tooltip("Prix:Q", format=".2f", title="Prix (€)"),
-                            alt.Tooltip("Score:Q", format=".2f"),
                             alt.Tooltip("Région:N"),
+                            alt.Tooltip("Note_moy:Q", format=".2f", title="Note moy."),
+                            alt.Tooltip("Nb:Q", title="Nb vins notés"),
                         ]
                     ).properties(height=220)
                     .configure_view(strokeWidth=0)
-                    .configure_axis(grid=True, gridColor="#f0f0f0", labelFont="DM Mono"))
-                st.altair_chart(chart_sc, use_container_width=True)
+                    .configure_axis(grid=False, labelFont="DM Sans", labelFontSize=11))
+                st.altair_chart(chart_rg, use_container_width=True)
             else:
                 st.caption("Données insuffisantes.")
 
@@ -3520,25 +3746,40 @@ with tab_data:
                              use_container_width=True, hide_index=True)
 
 # ── EXPORT ────────────────────────────────────────────────────────────────
-with tab_export:
+    # ── Export intégré ──────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("#### 📥 Export")
     today = datetime.now().strftime("%Y%m%d")
     col1, col2 = st.columns(2)
     with col1:
         st.markdown(f"**Vins filtrés** ({len(filtered)} vins)")
         df_f = _make_wines_df(filtered)
-        st.dataframe(df_f, use_container_width=True, hide_index=True, height=200,
+        st.dataframe(df_f, use_container_width=True, hide_index=True, height=180,
                      column_config=_DF_COL_CONFIG)
-        st.download_button("⬇️ CSV filtré",
-            df_f.drop(columns=["Query"], errors="ignore").to_csv(index=False, sep=";").encode("utf-8-sig"),
-            f"vins_{slug}_{today}.csv", "text/csv")
+        dl_c1, dl_c2 = st.columns(2)
+        with dl_c1:
+            st.download_button("⬇️ CSV filtré",
+                df_f.drop(columns=["Query"], errors="ignore").to_csv(index=False, sep=";").encode("utf-8-sig"),
+                f"vins_{slug}_{today}.csv", "text/csv", use_container_width=True)
+        with dl_c2:
+            # Copier liste texte
+            _exp_lines = []
+            for i, w in enumerate(filtered[:50], 1):
+                price_s = f"{w.get('price', 0):.2f} €".replace(".", ",")
+                rat_s   = f"★{w.get('rating', 0):.1f}" if w.get("rating") else ""
+                parts   = [p for p in [rat_s, price_s, w.get("region","")] if p]
+                _exp_lines.append(f"{i}. {w['name']} — {' · '.join(parts)}")
+            st.download_button("📋 Texte",
+                "\n".join(_exp_lines).encode("utf-8"),
+                f"vins_{slug}_{today}.txt", "text/plain", use_container_width=True,
+                help="Liste texte prête à coller dans un message")
     with col2:
         st.markdown(f"**Tous les vins** ({len(wines)} vins)")
-        # Réutilise df_wines déjà calculé dans tab_data
-        st.dataframe(df_wines, use_container_width=True, hide_index=True, height=200,
+        st.dataframe(df_wines, use_container_width=True, hide_index=True, height=180,
                      column_config=_DF_COL_CONFIG)
         st.download_button("⬇️ CSV complet",
             df_wines.drop(columns=["Query"], errors="ignore").to_csv(index=False, sep=";").encode("utf-8-sig"),
-            f"vins_{slug}_complet_{today}.csv", "text/csv")
+            f"vins_{slug}_complet_{today}.csv", "text/csv", use_container_width=True)
 
 # ── CONSOLE ───────────────────────────────────────────────────────────────
 st.divider()
