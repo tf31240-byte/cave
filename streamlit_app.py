@@ -1674,7 +1674,7 @@ def build_query(wine_name: str) -> str:
     nom = re.sub(r"\b(19|20)\d{2}\b", "", nom).strip().strip("-").strip()
 
     # Étape 4 : supprimer AOP/IGP/AOC/Vin de France où qu'ils soient
-    nom = re.sub(r"\s*\b(AOP|IGP|AOC|A\.O\.P|A\.O\.C|I\.G\.P)\b\.?", "", nom, re.I).strip()
+    nom = re.sub(r"\s*\b(AOP|IGP|AOC|A\.O\.P|A\.O\.C|I\.G\.P)\b\.?", "", nom, flags=re.I).strip()
 
     # Étape 5 : normalisation casse (tout-majuscule → Title Case)
     if re.match(r"^[A-Z][A-Z\s\'\-]+$", nom):
