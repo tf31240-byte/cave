@@ -759,7 +759,7 @@ def restore_from_gist() -> int:
 
 
 def _lec_path(slug): return CACHE_DIR / f"leclerc_{slug}.json"
-def _viv_path():     return CACHE_DIR / "vivino.json"
+def _viv_path(slug="vins-rouges"): return CACHE_DIR / f"vivino_{slug}.json"
 
 def load_leclerc_cache(slug: str) -> dict | None:
     p = _lec_path(slug)
@@ -823,8 +823,8 @@ def _normalize_vivino_entry(entry: dict) -> dict:
     return out
 
 
-def load_vivino_cache() -> dict:
-    p = _viv_path()
+def load_vivino_cache(slug: str = "vins-rouges") -> dict:
+    p = _viv_path(slug)
     raw = _read_json_cached(p, ttl=_MEM_CACHE_TTL)
     if not isinstance(raw, dict):
         return {}
@@ -843,8 +843,8 @@ def load_vivino_cache() -> dict:
         result[k] = entry
     return result
 
-def save_vivino_cache(cache: dict) -> None:
-    p, tmp = _viv_path(), _viv_path().with_suffix(".tmp")
+def save_vivino_cache(cache: dict, slug: str = "vins-rouges") -> None:
+    p, tmp = _viv_path(slug), _viv_path(slug).with_suffix(".tmp")
     try:
         data_str = json.dumps(cache, ensure_ascii=False, indent=2)
         tmp.write_text(data_str, "utf-8")
@@ -2383,12 +2383,12 @@ def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", reg
 def load_wines_from_cache(slug: str) -> list:
     lc = load_leclerc_cache(slug)
     if not lc: return []
-    return _merge_vivino(lc["wines"], load_vivino_cache(), load_price_history())
+    return _merge_vivino(lc["wines"], load_vivino_cache(slug), load_price_history())
 
 
 def run_check_stock(slug: str, log=None) -> list:
     lc = load_leclerc_cache(slug)
-    vc = load_vivino_cache()
+    vc = load_vivino_cache(slug)
     if lc:
         if log: log(f"📦 Cache Leclerc ({fmt_age(lc['cached_at'])}) — vérif. stock…")
         wines = check_availability(slug, lc["wines"], log=log)
@@ -2488,12 +2488,12 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
             # Sauvegarde incrémentale tous les 10 résultats → le polling temps réel
             # voit les nouvelles notes au fur et à mesure (pas seulement à la fin)
             if done_count % 10 == 0:
-                save_vivino_cache(vc)
+                save_vivino_cache(vc, slug)
                 if log: log(f"  ⚡ [{done_count}/{len(wines)}] {found} notes…")
         else:
             need_selenium.append((w, region))
 
-    save_vivino_cache(vc)
+    save_vivino_cache(vc, slug)
     phase1_found = found
     if log: log(f"  ✅ Phase 1 : {phase1_found} notes, {len(need_selenium)} vins restants pour Selenium")
 
@@ -2523,7 +2523,7 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
                 if log: log(f"  ✅ [{done_count}/{len(wines)}] {wine['name'][:38]}\n"
                             f"     ★ {vd['rating']} · {cnt_s} avis")
                 # Sauvegarde immédiate après chaque note trouvée → visible au prochain rerun
-                save_vivino_cache(vc)
+                save_vivino_cache(vc, slug)
             else:
                 if log and done_count % 5 == 0:
                     log(f"  🍷 [{done_count}/{len(wines)}] — {found} notes trouvées")
@@ -2535,7 +2535,7 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
         if driver is not None:
             try: driver.quit()
             except Exception: pass
-        save_vivino_cache(vc)
+        save_vivino_cache(vc, slug)
         remaining = len(wines) - done_count
         if interrupted or remaining > 0:
             if log: log(f"\n⚠️ {done_count}/{len(wines)} traités · {remaining} restants\n"
@@ -2665,7 +2665,7 @@ def run_refresh_vivino(slug: str, resume: bool = False, log=None) -> list:
     else:
         wines = [dict(w) for w in lc["wines"]]  # copie — ne mute pas lc["wines"]
         for w in wines: w.setdefault("available", True)
-    vc   = load_vivino_cache()
+    vc   = load_vivino_cache(slug)
     ckpt = ckpt_load(slug) if resume else None
     if ckpt:
         done_eans = set(ckpt["done_eans"])
@@ -2693,7 +2693,7 @@ def run_fill_missing_vivino(slug: str, log=None) -> list:
     if not lc:
         if log: log("❌ Pas de cache Leclerc. Lancez d'abord 🔄 Vérifier disponibilité.")
         return []
-    vc    = load_vivino_cache()
+    vc    = load_vivino_cache(slug)
     wines = [dict(w) for w in lc["wines"]]  # copie — ne mute pas lc["wines"]
     for w in wines: w.setdefault("available", True)
     missing = []
@@ -2717,7 +2717,7 @@ def run_refresh_stale_vivino(slug: str, log=None) -> list:
     if not lc:
         if log: log("❌ Pas de cache Leclerc. Lancez d'abord 🔄 Vérifier disponibilité.")
         return []
-    vc    = load_vivino_cache()
+    vc    = load_vivino_cache(slug)
     wines = [dict(w) for w in lc["wines"]]
     for w in wines: w.setdefault("available", True)
     stale = [w for w in wines
@@ -2960,7 +2960,7 @@ if _early_job.get("status") in {"running", "queued"}:
     _early_lc   = load_leclerc_cache(_early_slug) if _early_slug else None
     if _early_lc:
         _fresh = _merge_vivino(
-            _early_lc["wines"], load_vivino_cache(), load_price_history()
+            _early_lc["wines"], load_vivino_cache(_early_slug), load_price_history()
         )
         if _fresh:
             st.session_state.wines       = _fresh
@@ -2997,7 +2997,7 @@ with st.sidebar:
     st.markdown('<div class="sb-section">🔄 Mise à jour</div>', unsafe_allow_html=True)
 
     lc = load_leclerc_cache(slug)
-    vc = load_vivino_cache()
+    vc = load_vivino_cache(slug)
 
     if lc:
         n_total = len(lc["wines"])
@@ -3139,9 +3139,10 @@ with st.sidebar:
                         lc_p = _lec_path(slug_s)
                         if lc_p.exists():
                             ok += gist_push(lc_p.name, lc_p.read_text("utf-8"))
-                    viv_p = _viv_path()
-                    if viv_p.exists():
-                        ok += gist_push(viv_p.name, viv_p.read_text("utf-8"))
+                    for slug_v in WINE_TYPES.values():
+                        viv_p = _viv_path(slug_v)
+                        if viv_p.exists():
+                            ok += gist_push(viv_p.name, viv_p.read_text("utf-8"))
                     ph_p = _price_hist_path()
                     if ph_p.exists():
                         ok += gist_push(ph_p.name, ph_p.read_text("utf-8"))
@@ -3497,7 +3498,7 @@ with tab_rank:
                         with _r_cols[1]:
                             if st.button("✅ Confirmer", key=f"confirm_rej_{_uid}",
                                          use_container_width=True, type="primary"):
-                                _vc_live = load_vivino_cache()
+                                _vc_live = load_vivino_cache(slug)
                                 _q = build_query(w["name"])
                                 # Récupérer le titre Vivino depuis le cache avant suppression
                                 _old = _vc_live.get(_q, {})
@@ -3518,7 +3519,7 @@ with tab_rank:
                                     "manual_override": True, "suppressed": True,
                                     "locked": True, "cached_at": time.time(),
                                 }
-                                save_vivino_cache(_vc_live)
+                                save_vivino_cache(_vc_live, slug)
                                 # Recharger session_state.wines pour refléter le rejet
                                 # immédiatement (sans attendre btn_stock)
                                 _wines_fresh = load_wines_from_cache(slug)
@@ -3873,7 +3874,7 @@ with tab_data:
                     "locked": True,
                     "cached_at": time.time(),
                 }
-                save_vivino_cache(vc_now)
+                save_vivino_cache(vc_now, slug)
                 st.success("Correction enregistrée (entrée verrouillée).")
                 st.rerun()
             except Exception as e:
@@ -3891,7 +3892,7 @@ with tab_data:
                 "locked": True,
                 "cached_at": time.time(),
             }
-            save_vivino_cache(vc_now)
+            save_vivino_cache(vc_now, slug)
             st.success("Info Vivino supprimée et verrouillée (ne sera plus auto-remplie).")
             st.rerun()
 
@@ -3902,7 +3903,7 @@ with tab_data:
                 entry["suppressed"]      = False
                 entry["manual_override"] = False
                 vc_now[manual_key] = entry
-                save_vivino_cache(vc_now)
+                save_vivino_cache(vc_now, slug)
             st.success("Entrée déverrouillée. Les prochains refresh Vivino pourront la recalculer.")
             st.rerun()
 
