@@ -3236,7 +3236,9 @@ def _update_wines_from_cache():
 if slug != st.session_state.loaded_slug:
     st.session_state.wines = []
     st.session_state.data_ready = False
-    st.session_state.loaded_slug = slug  # évite le reset en boucle si cache absent
+    st.session_state.loaded_slug = slug
+    _update_wines_from_cache()   # charger immédiatement le cache du nouveau type
+    st.rerun()                   # re-exécuter le script avec le nouveau slug actif
 
 if not st.session_state.data_ready and not btn_stock and not btn_vivino \
         and not btn_fill and not btn_resume and not btn_stale:
