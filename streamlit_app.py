@@ -618,11 +618,17 @@ _GIST_ID_CFG  = _GIST_CONF.get("gist_id", "")
 
 # Fichiers à persister dans le Gist (filenames exacts du CACHE_DIR)
 _GIST_FILES = {
-    "vivino.json",
+    # Leclerc par slug
     "leclerc_vins-rouges.json",
     "leclerc_vins-blancs.json",
     "leclerc_vins-roses.json",
     "leclerc_vins-mousseux-et-petillants.json",
+    # Vivino par slug (un fichier par type de vin)
+    "vivino_vins-rouges.json",
+    "vivino_vins-blancs.json",
+    "vivino_vins-roses.json",
+    "vivino_vins-mousseux-et-petillants.json",
+    # Partagés
     "price_history.json",
     "vivino_rejections.json",
 }
@@ -3228,7 +3234,9 @@ def _update_wines_from_cache():
     return bool(latest)
 
 if slug != st.session_state.loaded_slug:
-    st.session_state.wines = []; st.session_state.data_ready = False
+    st.session_state.wines = []
+    st.session_state.data_ready = False
+    st.session_state.loaded_slug = slug  # évite le reset en boucle si cache absent
 
 if not st.session_state.data_ready and not btn_stock and not btn_vivino \
         and not btn_fill and not btn_resume and not btn_stale:
