@@ -2953,6 +2953,37 @@ def _make_logger(max_lines: int = 10):
     return _log, box
 
 
+def _fmt_log_line(line: str) -> str:
+    """Formate une ligne de log pour la console HTML : timestamp grisé + coloration par niveau."""
+    import html as _html
+    # Extraire le timestamp [HH:MM:SS] si présent
+    ts, rest = "", line
+    if line.startswith("[") and len(line) > 9 and line[9] == "]":
+        ts   = _html.escape(line[:10])
+        rest = line[10:]
+    else:
+        rest = line
+    rest_esc = _html.escape(rest)
+    # Couleur selon le contenu
+    if any(k in rest for k in ("✅", "succès", "terminé", "sauvegardé", "Cached")):
+        color = "#3fb950"  # vert
+    elif any(k in rest for k in ("❌", "Erreur", "ERROR", "Exception", "failed")):
+        color = "#f85149"  # rouge
+    elif any(k in rest for k in ("⚠️", "Warning", "obsolète", "manquant", "stale")):
+        color = "#d29922"  # jaune
+    elif any(k in rest for k in ("🌐", "Page ", "Chargement", "http")):
+        color = "#79c0ff"  # bleu clair
+    elif any(k in rest for k in ("🔎", "Vivino", "API", "fetch", "score")):
+        color = "#d2a8ff"  # violet
+    elif any(k in rest for k in ("📦", "Cache", "💾")):
+        color = "#ffa657"  # orange
+    else:
+        color = "#c9d1d9"  # blanc cassé (défaut)
+    ts_html   = f'<span style="color:#484f58">{ts}</span>' if ts else ""
+    rest_html = f'<span style="color:{color}">{rest_esc}</span>'
+    return ts_html + rest_html
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # APP STREAMLIT
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3008,14 +3039,19 @@ if _early_job.get("status") in {"running", "queued"}:
 # Déclencher le rerun ici (avant tout rendu) garantit que les onglets
 # reçoivent les données fraîches chargées ci-dessus, et non les données
 # du cycle précédent.
-if _early_job.get("status") in {"running", "queued"}:
-    _auto_live_on = st.session_state.get("auto_live", True)
-    if _auto_live_on:
-        _now_top = time.time()
-        _elapsed = _now_top - st.session_state.get("last_live_refresh", 0.0)
-        if _elapsed >= 2.0:
-            st.session_state["last_live_refresh"] = _now_top
-            st.rerun()
+_auto_live_on = st.session_state.get("auto_live", True)
+_job_is_live  = _early_job.get("status") in {"running", "queued"}
+# Continuer le rerun 6s après la fin du job pour capturer les dernières lignes de log
+_job_just_done = (
+    _early_job.get("status") in {"done", "error"}
+    and time.time() - (_early_job.get("finished_at") or 0) < 6.0
+)
+if _auto_live_on and (_job_is_live or _job_just_done):
+    _now_top = time.time()
+    _elapsed = _now_top - st.session_state.get("last_live_refresh", 0.0)
+    if _elapsed >= 2.0:
+        st.session_state["last_live_refresh"] = _now_top
+        st.rerun()
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -3293,24 +3329,28 @@ if btn_stock:
 if btn_vivino:
     ckpt_finish(slug)
     if start_background_job(slug, "refresh_all"):
+        st.session_state["console_open"] = True
         st.success("Scraping Vivino lancé en arrière-plan.")
     else:
         st.warning("Un job est déjà en cours.")
 
 if btn_fill:
     if start_background_job(slug, "fill_missing"):
+        st.session_state["console_open"] = True
         st.success("Complétion des manquants lancée en arrière-plan.")
     else:
         st.warning("Un job est déjà en cours.")
 
 if btn_stale:
     if start_background_job(slug, "refresh_stale"):
+        st.session_state["console_open"] = True
         st.success(f"Rafraîchissement de {n_stale_total} entrées obsolètes lancé en arrière-plan.")
     else:
         st.warning("Un job est déjà en cours.")
 
 if btn_resume:
     if start_background_job(slug, "resume"):
+        st.session_state["console_open"] = True
         st.success("Reprise du scraping lancée en arrière-plan.")
     else:
         st.warning("Un job est déjà en cours.")
@@ -4048,37 +4088,70 @@ with tab_data:
 st.divider()
 _has_log = JOB_LOG_PATH.exists() and JOB_LOG_PATH.stat().st_size > 0
 _console_visible = st.session_state.get("console_open", False)
+_job_running_now = job.get("status") in {"running", "queued"}
 
 _con_cols = st.columns([1, 6, 1])
 with _con_cols[0]:
     _btn_lbl = "▼ Console" if not _console_visible else "▲ Console"
     if st.button(_btn_lbl, key="toggle_console",
-                 type="primary" if job.get("status") == "running" else "secondary",
-                 help="Affiche l'historique complet des logs du dernier scraping"):
+                 type="primary" if _job_running_now else "secondary",
+                 help="Affiche les logs du scraping en temps réel"):
         st.session_state["console_open"] = not _console_visible
         st.rerun()
 with _con_cols[1]:
-    if job.get("status") == "running":
-        st.caption(f"🟢 Scraping en cours · {job.get('message','')[:80]}")
+    if _job_running_now:
+        _live_badge = '<span style="color:#4caf50;font-weight:600;font-size:.75rem">'\
+                      '🟢 LIVE</span>'
+        st.markdown(
+            f"{_live_badge} &nbsp; {job.get('message','')[:90]}",
+            unsafe_allow_html=True)
     elif _has_log:
-        st.caption("🖥️ Logs du dernier job disponibles")
+        _fin_at = job.get("finished_at")
+        _fin_str = f" · terminé {fmt_age(_fin_at)}" if _fin_at else ""
+        st.caption(f"🖥️ Logs du dernier job{_fin_str}")
 
 if _console_visible:
-    _con_inner = st.container()
-    with _con_inner:
-        try:
-            _log_txt   = JOB_LOG_PATH.read_text("utf-8") if _has_log else "(aucun log)"
-            _log_lines = _log_txt.strip().splitlines()[-300:]
-            st.code("\n".join(_log_lines), language=None)
-        except Exception:
-            st.caption("(log inaccessible)")
-        _cc1, _cc2 = st.columns([1, 5])
-        with _cc1:
-            if st.button("🗑️ Effacer", key="clear_console", use_container_width=True):
-                try: JOB_LOG_PATH.write_text("", "utf-8")
-                except Exception: pass
-                st.session_state["console_open"] = False
-                st.rerun()
+    try:
+        _log_txt   = JOB_LOG_PATH.read_text("utf-8") if _has_log else ""
+        _log_lines = _log_txt.strip().splitlines()
+        _n_lines   = len(_log_lines)
+        _log_display = "\n".join(_log_lines[-500:])  # 500 lignes max
+    except Exception:
+        _log_display = "(log inaccessible)"
+        _n_lines = 0
+
+    # Header console
+    _ch1, _ch2, _ch3 = st.columns([3, 2, 1])
+    with _ch1:
+        st.caption(f"🖥️ Console · {_n_lines} lignes")
+    with _ch2:
+        if _job_running_now:
+            st.caption("⚡ mise à jour toutes les ~2s")
+    with _ch3:
+        if st.button("🗑️ Effacer", key="clear_console", use_container_width=True):
+            try: JOB_LOG_PATH.write_text("", "utf-8")
+            except Exception: pass
+            st.session_state["console_open"] = False
+            st.rerun()
+
+    # Rendu console : fond sombre, police mono, scroll automatique vers le bas
+    _console_html = (
+        '<div id="cave-console" style="'
+        'background:#0d1117;color:#c9d1d9;font-family:'"'"'Consolas','Monaco','monospace'"'"';'
+        'font-size:.72rem;line-height:1.5;padding:.75rem 1rem;'
+        'border-radius:6px;border:1px solid #30363d;'
+        'height:360px;overflow-y:auto;white-space:pre-wrap;word-break:break-all">'
+        + "\n".join(
+            _fmt_log_line(l)
+            for l in (_log_display.splitlines() if _log_display else ["(aucun log)"])
+        )
+        + '</div>'
+        '<script>'
+        'var c=document.getElementById("cave-console");'
+        'if(c){c.scrollTop=c.scrollHeight;}'
+        '</script>'
+    )
+    st.markdown(_console_html, unsafe_allow_html=True)
 
 # ── REJETS VIVINO ─────────────────────────────────────────────────────────
 with tab_rej:
