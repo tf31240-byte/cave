@@ -2921,8 +2921,8 @@ def _make_logger(max_lines: int = 10):
 # ═══════════════════════════════════════════════════════════════════════════
 
 st.markdown(
-    '<div class="main-title">Cave <span>Leclerc</span> Blagnac</div>'
-    '<div class="subtitle">Qualité / prix · Vivino · Blagnac</div>'
+    '<div class="main-title">🍷 Cave <span>Leclerc Blagnac</span> × Vivino</div>'
+    '<div class="subtitle">Qualité / prix · Blagnac</div>'
     '<hr class="title-rule">',
     unsafe_allow_html=True)
 
@@ -3186,14 +3186,15 @@ gist_id      = ""
         _prev_val = (max(0, _prev_val[0]), min(_prev_val[1], _price_ceil))
         st.session_state["_price_ceil_prev"] = _price_ceil
     price_range = st.slider(
-        "💶 Prix (€)", 0, _price_ceil, _prev_val, step=5,
+        "💶 Prix (€)", 0, _price_ceil, _prev_val, step=1,
         key=f"price_range_{slug}",
     )
     st.session_state["price_range_val"] = price_range
 
     rating_min = st.select_slider("⭐ Note min",
-        options=[0.0, 3.0, 3.5, 3.8, 4.0, 4.2, 4.5], value=0.0,
-        format_func=lambda x: "Toutes" if x == 0 else f"≥ {x} ★")
+        options=[0.0, 2.5, 3.0, 3.2, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 4.0, 4.1, 4.2, 4.3, 4.4, 4.5],
+        value=0.0,
+        format_func=lambda x: "Toutes" if x == 0 else f"≥ {x:.1f} ★")
 
     # Fix H : régions depuis wines enrichis (.region déjà calculé) si dispo
     _region_source = _all_wines or (lc["wines"] if lc else [])
@@ -3371,6 +3372,7 @@ for col, (label, fn) in zip([_sc1, _sc2, _sc3, _sc4], SORTS.items()):
                      type="primary" if active else "secondary",
                      use_container_width=True, help=_sort_help.get(label,"")):
             st.session_state.sort_key = label
+            st.rerun()
 filtered.sort(key=SORTS.get(st.session_state.sort_key, SORTS["Q/P 💰"]))
 
 # ── ONGLETS ───────────────────────────────────────────────────────────────
