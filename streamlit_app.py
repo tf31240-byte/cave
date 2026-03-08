@@ -3371,7 +3371,7 @@ for col, (label, fn) in zip([_sc1, _sc2, _sc3, _sc4], SORTS.items()):
                      type="primary" if active else "secondary",
                      use_container_width=True, help=_sort_help.get(label,"")):
             st.session_state.sort_key = label
-filtered.sort(key=SORTS.get(st.session_state.sort_key, SORTS["💰 Q/P"]))
+filtered.sort(key=SORTS.get(st.session_state.sort_key, SORTS["Q/P 💰"]))
 
 # ── ONGLETS ───────────────────────────────────────────────────────────────
 tab_rank, tab_deals, tab_stats, tab_data, tab_rej = st.tabs(
