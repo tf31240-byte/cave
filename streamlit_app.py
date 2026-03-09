@@ -732,10 +732,18 @@ def gist_pull_all() -> dict:
         return {}
 
 
+_gist_push_last: dict[str, float] = {}   # filename → last push timestamp
+_GIST_PUSH_MIN_INTERVAL = 30.0           # seconds entre 2 push du même fichier
+
 def _gist_push_async(filename: str, content: str) -> None:
-    """Push non-bloquant : lance gist_push dans un thread daemon."""
+    """Push non-bloquant throttlé : max 1 push par fichier toutes les 30s.
+    Évite la saturation de threads lors des sauvegardes incrémentielles du scraping."""
     if not _gist_is_configured():
         return
+    now = time.time()
+    if now - _gist_push_last.get(filename, 0) < _GIST_PUSH_MIN_INTERVAL:
+        return   # trop tôt — skip ce push, le prochain sera envoyé
+    _gist_push_last[filename] = now
     threading.Thread(
         target=gist_push, args=(filename, content), daemon=True
     ).start()
@@ -1066,7 +1074,7 @@ _job_buf_last_flush: float = 0.0
 _JOB_FLUSH_INTERVAL    = 1.0  # s
 
 def load_job_state() -> dict:
-    data = _read_json_cached(JOB_STATE_PATH, ttl=_MEM_CACHE_TTL)
+    data = _read_json_cached(JOB_STATE_PATH, ttl=0.5)  # TTL court : réactivité temps réel console
     return data if isinstance(data, dict) else {}
 
 
@@ -1252,9 +1260,10 @@ _REGIONS = [
     "Haut-Médoc","Médoc","Pessac-Léognan","Graves","Entre-Deux-Mers",
     "Bordeaux Supérieur","Bordeaux",
     "Gevrey-Chambertin","Nuits-Saint-Georges","Pommard","Volnay","Beaune",
-    "Aloxe-Corton","Meursault","Puligny-Montrachet","Chablis",
-    "Mâcon","Pouilly-Fuissé","Bourgogne",
-    "Châteauneuf-du-Pape","Gigondas","Vacqueyras","Rasteau",
+    "Aloxe-Corton","Meursault","Puligny-Montrachet","Chassagne-Montrachet",
+    "Saint-Aubin","Chablis Premier Cru","Chablis Grand Cru","Chablis",
+    "Mâcon-Villages","Mâcon","Pouilly-Fuissé","Saint-Véran","Viré-Clessé","Bourgogne",
+    "Châteauneuf-du-Pape","Gigondas","Vacqueyras","Rasteau","Condrieu","Viognier",
     "Crozes-Hermitage","Hermitage","Cornas","Saint-Joseph",
     "Côtes du Rhône Villages","Côtes du Rhône",
     "Bandol","Côtes de Provence","Provence",
@@ -1263,9 +1272,18 @@ _REGIONS = [
     "Côtes du Roussillon Villages","Côtes du Roussillon","Roussillon",
     "Cahors","Madiran","Bergerac","Pécharmant","Fronton","Gaillac","Marcillac","Irouléguy",
     "Saumur-Champigny","Saumur","Bourgueil","Saint-Nicolas-de-Bourgueil","Chinon",
-    "Anjou","Muscadet","Sancerre","Pouilly-Fumé","Loire",
+    "Vouvray","Montlouis-sur-Loire","Anjou","Muscadet Sèvre et Maine","Muscadet",
+    "Sancerre","Pouilly-Fumé","Quincy","Reuilly","Menetou-Salon","Loire",
     "Fleurie","Moulin-à-Vent","Morgon","Brouilly","Beaujolais Villages","Beaujolais",
-    "Alsace","Côtes de Gascogne","Pays d'Oc","Vin de France",
+    # Alsace
+    "Alsace Grand Cru","Alsace Riesling","Alsace Gewurztraminer",
+    "Alsace Pinot Gris","Alsace Pinot Blanc","Alsace",
+    # Champagne & Mousseux
+    "Champagne","Crémant d'Alsace","Crémant de Bourgogne","Crémant de Loire",
+    "Crémant du Jura","Blanquette de Limoux","Clairette de Die","Prosecco","Cava",
+    # Divers
+    "Côtes de Gascogne","Jurançon","Pacherenc du Vic-Bilh",
+    "Pays d'Oc","Vin de France",
 ]
 
 def _norm_ascii(s: str) -> str:
@@ -1691,10 +1709,16 @@ def build_query(wine_name: str) -> str:
     nom = _clean_tail(nom)
 
     # Étape 7 : couper avant les mots-coupure (Cuvée, Vieilles Vignes…)
-    _CUT = {"Cuvée", "Cuvee", "Vieilles", "Vieille", "Grande", "Vignes"}
+    # "Grande" ne coupe que si suivi d'un autre descripteur de cuvée (Cuvée, Réserve…)
+    # afin de ne pas tronquer des noms propres comme "Domaine de la Grande Bellane".
+    _CUT = {"Cuvée", "Cuvee", "Vieilles", "Vieille", "Vignes"}
+    _CUT_AFTER_GRANDE = {"Cuvée", "Cuvee", "Réserve", "Reserve", "Tradition"}
     words = nom.split()
     for i, w in enumerate(words[2:], 2):
         if w in _CUT:
+            nom = " ".join(words[:i])
+            break
+        if w == "Grande" and i + 1 < len(words) and words[i + 1] in _CUT_AFTER_GRANDE:
             nom = " ".join(words[:i])
             break
 
@@ -2177,7 +2201,7 @@ def _set_store_cookie(driver) -> None:
     """
     try:
         # Naviguer sur la page d'accueil pour établir le domaine
-        driver.get("https://www.e.leclerc/cat/vins-rouges")
+        driver.get("https://www.e.leclerc/")  # domaine cookie — catégorie indépendante
         # Injecter le cookie AVANT de recharger la vraie page
         driver.add_cookie({
             "name":   "oafSignCode",
@@ -2257,6 +2281,7 @@ def check_availability(slug: str, cached_wines: list, log=None) -> list:
         driver = make_driver()
         _set_store_cookie(driver)   # injecter le magasin avant de scraper
         for p in range(1, MAX_PAGES + 1):
+            if log: log(f"🌐 Vérif. stock page {p}/{nb_pages}…")
             driver.get(leclerc_url(slug, p))
             try: WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card")))
@@ -2264,10 +2289,13 @@ def check_availability(slug: str, cached_wines: list, log=None) -> list:
             time.sleep(1.5)
             page_src = driver.page_source
             page_w   = parse_cards(page_src)
-            if not page_w: break
+            if not page_w:
+                if log: log(f"⚠️ Page {p} vide — arrêt du scraping stock")
+                break
             # Bug 2 fix : on n'ajoute pas les EAN vides — '' in current_eans
             # marquerait TOUS les vins sans EAN comme disponibles à tort
             current_eans.update(w["ean"] for w in page_w if w.get("ean"))
+            if log: log(f"  ✅ Page {p} : {len(page_w)} vins ({len(current_eans)} EAN collectés)")
             # Fix 11b : lit le nb de pages réel depuis la page 1
             if p == 1:
                 nb_pages = min(get_nb_pages(page_src), MAX_PAGES)
@@ -2522,11 +2550,13 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
             ckpt_tick(slug, ean)
             done_count += 1
             found += bool(res.get("rating"))
+            if log and res.get("rating"):
+                cnt_s = f"{res['ratings_count']:,}".replace(",", "\u202f") if res.get("ratings_count") else "—"
+                log(f"  ⚡ [{done_count}/{len(wines)}] {w['name'][:40]} ★ {res['rating']} · {cnt_s}")
             # Sauvegarde incrémentale tous les 10 résultats → le polling temps réel
             # voit les nouvelles notes au fur et à mesure (pas seulement à la fin)
             if done_count % 10 == 0:
                 save_vivino_cache(vc, slug)
-                if log: log(f"  ⚡ [{done_count}/{len(wines)}] {found} notes…")
         else:
             need_selenium.append((w, region))
 
@@ -2562,8 +2592,8 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
                 # Sauvegarde immédiate après chaque note trouvée → visible au prochain rerun
                 save_vivino_cache(vc, slug)
             else:
-                if log and done_count % 5 == 0:
-                    log(f"  🍷 [{done_count}/{len(wines)}] — {found} notes trouvées")
+                if log:
+                    log(f"  🔍 [{done_count}/{len(wines)}] {wine['name'][:45]} — aucune note")
             time.sleep(0.3)
     except Exception as e:
         interrupted = True
@@ -3024,32 +3054,51 @@ if _restore_msg and not st.session_state.get("_gist_restore_toasted"):
 # appelé APRÈS le rendu des onglets (trop tard pour ce cycle).
 _early_job = load_job_state()
 if _early_job.get("status") in {"running", "queued"}:
-    _early_slug = _early_job.get("slug")
-    _early_lc   = load_leclerc_cache(_early_slug) if _early_slug else None
-    if _early_lc:
-        _fresh = _merge_vivino(
-            _early_lc["wines"], load_vivino_cache(_early_slug), load_price_history()
-        )
-        if _fresh:
-            st.session_state.wines       = _fresh
-            st.session_state.loaded_slug = _early_slug
-            st.session_state.data_ready  = True
+    _early_slug   = _early_job.get("slug")
+    # FIX A : ne rafraîchir que si le job correspond au slug que l'utilisateur
+    # consulte actuellement. Si l'utilisateur a basculé sur un autre type (ex.
+    # rouge → blanc), ne PAS écraser loaded_slug avec le slug du job rouge :
+    # cela provoquerait une boucle infinie slug != loaded_slug → rerun → écraser...
+    _active_slug  = st.session_state.get("loaded_slug", _early_slug)
+    if _early_slug and _early_slug == _active_slug:
+        _early_lc = load_leclerc_cache(_early_slug)
+        if _early_lc:
+            _fresh = _merge_vivino(
+                _early_lc["wines"], load_vivino_cache(_early_slug), load_price_history()
+            )
+            if _fresh:
+                st.session_state.wines       = _fresh
+                st.session_state.loaded_slug = _early_slug
+                st.session_state.data_ready  = True
 
 # ── AUTO-RERUN ────────────────────────────────────────────────────────────
 # Déclencher le rerun ici (avant tout rendu) garantit que les onglets
 # reçoivent les données fraîches chargées ci-dessus, et non les données
 # du cycle précédent.
 _auto_live_on = st.session_state.get("auto_live", True)
-_job_is_live  = _early_job.get("status") in {"running", "queued"}
+# _job_is_live : job actif sur le slug que l'utilisateur consulte → rerun rapide 1.5s
+_job_is_live  = (
+    _early_job.get("status") in {"running", "queued"}
+    and _early_job.get("slug") == st.session_state.get("loaded_slug")
+)
+# _job_cross_slug : job actif sur un AUTRE slug → rerun lent 4s (pour rafraîchir
+# la barre de progression + console sans risquer une oscillation de l'UI, puisque
+# FIX A empêche désormais l'écrasement du loaded_slug par le slug du job).
+_job_cross_slug = (
+    _early_job.get("status") in {"running", "queued"}
+    and _early_job.get("slug") != st.session_state.get("loaded_slug")
+)
 # Continuer le rerun 6s après la fin du job pour capturer les dernières lignes de log
 _job_just_done = (
     _early_job.get("status") in {"done", "error"}
     and time.time() - (_early_job.get("finished_at") or 0) < 6.0
+    and _early_job.get("slug") == st.session_state.get("loaded_slug")
 )
-if _auto_live_on and (_job_is_live or _job_just_done):
+if _auto_live_on and (_job_is_live or _job_just_done or _job_cross_slug):
     _now_top = time.time()
+    _interval = 1.5 if (_job_is_live or _job_just_done) else 4.0
     _elapsed = _now_top - st.session_state.get("last_live_refresh", 0.0)
-    if _elapsed >= 2.0:
+    if _elapsed >= _interval:
         st.session_state["last_live_refresh"] = _now_top
         st.rerun()
 
@@ -3115,10 +3164,29 @@ with st.sidebar:
 
 
 
+    # FIX D : si un job tourne sur un AUTRE slug, désactiver tous les boutons
+    # d'action et afficher un avertissement clair. Sans ça, l'utilisateur peut
+    # lancer un 2e job en parallèle (depuis la vue d'un autre type de vin),
+    # ce qui corrompt job_state.json et produit des résultats imprévisibles.
+    _any_job_running = job.get("status") in {"running", "queued"}
+    _cross_slug_job  = _any_job_running and job.get("slug") != slug
+    _cross_slug_label = next(
+        (k for k, v in WINE_TYPES.items() if v == job.get("slug")), job.get("slug", "")
+    ) if _cross_slug_job else ""
+
+    if _cross_slug_job:
+        st.info(
+            f"⏳ Scraping **{_cross_slug_label}** en cours…\n\n"
+            f"Les actions sont désactivées pendant ce temps.",
+            icon=None,
+        )
+
     btn_stock  = st.button("🔄 Vérifier disponibilité", use_container_width=True, type="primary",
-                           help="Vérifie les vins en rayon. Vivino depuis le cache.")
+                           help="Vérifie les vins en rayon. Vivino depuis le cache.",
+                           disabled=_any_job_running)
     btn_vivino = st.button("🍷 Rafraîchir toutes les notes (arrière-plan)", use_container_width=True,
-                           help="Lance le scraping Vivino en tâche de fond pour continuer à utiliser l'app.")
+                           help="Lance le scraping Vivino en tâche de fond pour continuer à utiliser l'app.",
+                           disabled=_any_job_running)
     # Bouton réparer les prix — visible si des vins ont prix=0
     n_zero_price = sum(1 for w in (lc["wines"] if lc else []) if not w.get("price"))
     btn_repair_prices = False
@@ -3127,20 +3195,23 @@ with st.sidebar:
             f"🔧 Réparer les prix manquants ({n_zero_price})",
             use_container_width=True,
             help=f"{n_zero_price} vins ont un prix à 0€ — rescraping pour récupérer les vrais prix.",
-            type="primary"
+            type="primary",
+            disabled=_any_job_running,
         )
 
     btn_fill = False
     if n_missing > 0 and lc:
         btn_fill = st.button(f"🔎 Compléter les manquants ({n_missing}) (arrière-plan)",
                              use_container_width=True,
-                             help=f"Scrape uniquement les {n_missing} vins sans données Vivino en tâche de fond.")
+                             help=f"Scrape uniquement les {n_missing} vins sans données Vivino en tâche de fond.",
+                             disabled=_any_job_running)
     n_stale_total = sum(1 for v in vc.values() if v.get("_stale"))
     btn_stale = False
     if n_stale_total > 0 and lc:
         btn_stale = st.button(f"⏳ Rafraîchir obsolètes ({n_stale_total}) (arrière-plan)",
                               use_container_width=True,
-                              help=f"{n_stale_total} notes Vivino datent de plus de {VIVINO_CACHE_TTL_DAYS} jours.")
+                              help=f"{n_stale_total} notes Vivino datent de plus de {VIVINO_CACHE_TTL_DAYS} jours.",
+                              disabled=_any_job_running)
 
     ckpt = ckpt_load(slug)
     btn_resume = False
@@ -3151,7 +3222,8 @@ with st.sidebar:
                    f"{n_done}/{ckpt['total']} vins traités ({pct}%)\n\n"
                    f"Lancé {fmt_age(ckpt['started_at'])}", icon=None)
         col_r, col_x = st.columns(2)
-        with col_r: btn_resume = st.button("▶️ Reprendre", use_container_width=True, type="primary")
+        with col_r: btn_resume = st.button("▶️ Reprendre", use_container_width=True, type="primary",
+                                            disabled=_cross_slug_job)
         with col_x:
             if st.button("✖ Annuler", use_container_width=True):
                 ckpt_finish(slug); st.rerun()
@@ -3163,35 +3235,36 @@ with st.sidebar:
     # bloquant le serveur Streamlit pour tous les utilisateurs pendant 5s.
     # Nouvelle approche : st.rerun() immédiat avec un délai minimum géré via
     # session_state (last_live_refresh) pour éviter les boucles infinies.
-    auto_live = st.checkbox("🟢 Suivi temps réel (auto ~2s)", value=True,
+    auto_live = st.checkbox("🟢 Suivi temps réel (auto ~1.5s)", value=True,
                             key="auto_live_chk",
                             help="Met à jour l'ensemble de l'interface toutes les 2s pendant un scraping.")
     # Propager la préférence pour le trigger en haut de script
     st.session_state["auto_live"] = auto_live
 
-    if job.get("status") == "running" and job.get("slug") == slug:
+    _job_slug       = job.get("slug", "")
+    _job_slug_label = next((k for k, v in WINE_TYPES.items() if v == _job_slug), _job_slug)
+    _slug_prefix    = f"[{_job_slug_label}] " if _job_slug and _job_slug != slug else ""
+    if job.get("status") in {"running", "queued"}:
         msg = job.get("message", "")
         age = fmt_age(job.get("updated_at", 0))
-        # Extraire le ratio [X/Y] du message pour afficher une barre de progression
         import re as _re
         m_prog = _re.search(r"\[(\d+)/(\d+)\]", msg)
         if m_prog:
             done_n, total_n = int(m_prog.group(1)), int(m_prog.group(2))
             pct = done_n / max(total_n, 1)
-            st.progress(pct, text=f"⏳ {done_n}/{total_n} vins · {age}")
+            st.progress(pct, text=f"⏳ {_slug_prefix}{done_n}/{total_n} vins · {age}")
         else:
-            st.info(f"⏳ Job en cours ({job.get('mode')})\n\n{msg}\n\nMàj: {age}", icon=None)
-    elif job.get("status") == "done" and job.get("slug") == slug:
-        # Afficher le toast 1× puis effacer le status pour ne pas répéter
+            st.info(f"⏳ {_slug_prefix}Job en cours ({job.get('mode')})\n\n{msg}\n\nMàj: {age}", icon=None)
+    elif job.get("status") == "done" and _job_slug == slug:
         done_key = f"_job_done_toasted_{job.get('finished_at',0)}"
         if not st.session_state.get(done_key):
             st.session_state[done_key] = True
             st.toast(job.get("message", "✅ Job terminé"), icon="✅")
-    elif job.get("status") == "error" and job.get("slug") == slug:
+    elif job.get("status") == "error":
         err_key = f"_job_err_toasted_{job.get('finished_at',0)}"
         if not st.session_state.get(err_key):
             st.session_state[err_key] = True
-            st.toast(f"❌ Erreur : {job.get('error','inconnue')}", icon="❌")
+            st.toast(f"❌ {_slug_prefix}Erreur : {job.get('error','inconnue')}", icon="❌")
 
     st.markdown(
         f'<div style="font-size:.6rem;color:rgba(200,168,176,.4);margin:.3rem 0 .1rem;letter-spacing:.05em">'
@@ -3253,17 +3326,18 @@ gist_id      = ""
 
     # Fix 8 : préserver la sélection utilisateur entre reruns (auto_live, job polling)
     # On stocke la dernière valeur choisie et on la reclamp si _price_ceil change.
-    _prev_ceil = st.session_state.get("_price_ceil_prev", _price_ceil)
-    _prev_val  = st.session_state.get("price_range_val", (0, _price_ceil))
+    # Clés préfixées par slug pour éviter les collisions entre types de vin.
+    _prev_ceil = st.session_state.get(f"_price_ceil_prev_{slug}", _price_ceil)
+    _prev_val  = st.session_state.get(f"price_range_val_{slug}", (0, _price_ceil))
     if _price_ceil != _prev_ceil:
         # Le max a changé (nouvelles données) : reclamp la borne haute
         _prev_val = (max(0, _prev_val[0]), min(_prev_val[1], _price_ceil))
-        st.session_state["_price_ceil_prev"] = _price_ceil
+        st.session_state[f"_price_ceil_prev_{slug}"] = _price_ceil
     price_range = st.slider(
         "💶 Prix (€)", 0, _price_ceil, _prev_val, step=1,
         key=f"price_range_{slug}",
     )
-    st.session_state["price_range_val"] = price_range
+    st.session_state[f"price_range_val_{slug}"] = price_range
 
     rating_min = st.select_slider("⭐ Note min",
         options=[0.0, 2.5, 3.0, 3.2, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 4.0, 4.1, 4.2, 4.3, 4.4, 4.5],
@@ -3368,11 +3442,12 @@ if btn_repair_prices:
         except Exception as e:
             st.error(f"❌ {e}")
 
-# Le polling (auto-rerun + _update_wines_from_cache) est maintenant en tête
-# de script, avant tout rendu, pour que les onglets voient les données fraîches.
-# On recharge seulement si le slug du job ne correspond pas au slug actif.
-if job.get("status") in {"running", "queued"} and job.get("slug") != slug:
-    _update_wines_from_cache()   # slug différent — recharger quand même
+# Rechargement des données depuis le cache :
+# FIX C : seulement si le job tourne sur le slug actif.
+# Si job rouge tourne et utilisateur est sur blanc, NE PAS écraser wines=[blancs]
+# avec les données du job rouge (ni vider wines si cache blanc absent).
+if job.get("status") in {"running", "queued"} and job.get("slug") == slug:
+    _update_wines_from_cache()   # recharger les données partielles du slug actif
 
 if job.get("status") == "done" and job.get("slug") == slug:
     _update_wines_from_cache()
@@ -3920,19 +3995,19 @@ with tab_data:
     st.markdown('<div class="tab-section">🛠️ Correction manuelle</div>', unsafe_allow_html=True)
     names = sorted({w["name"] for w in wines})
     if names:
-        selected_name = st.selectbox("Vin à corriger", names, key="manual_vivino_name")
+        selected_name = st.selectbox("Vin à corriger", names, key=f"manual_vivino_name_{slug}")
         manual_key = build_query(selected_name)
         current = vc_now.get(manual_key, {})
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            rating_input = st.text_input("Note (0-5)", value="" if current.get("rating") is None else str(current.get("rating")), key="manual_rating")
+            rating_input = st.text_input("Note (0-5)", value="" if current.get("rating") is None else str(current.get("rating")), key=f"manual_rating_{slug}")
         with c2:
-            ratings_count_input = st.number_input("Nb avis", min_value=0, step=1, value=int(current.get("ratings_count") or 0), key="manual_count")
+            ratings_count_input = st.number_input("Nb avis", min_value=0, step=1, value=int(current.get("ratings_count") or 0), key=f"manual_count_{slug}")
         with c3:
-            year_input = st.text_input("Millésime Vivino", value="" if current.get("vivino_year") is None else str(current.get("vivino_year")), key="manual_year")
+            year_input = st.text_input("Millésime Vivino", value="" if current.get("vivino_year") is None else str(current.get("vivino_year")), key=f"manual_year_{slug}")
 
-        url_input = st.text_input("URL Vivino", value=current.get("vivino_url", ""), key="manual_url")
+        url_input = st.text_input("URL Vivino", value=current.get("vivino_url", ""), key=f"manual_url_{slug}")
         col_a, col_b, col_c = st.columns(3)
 
         if col_a.button("💾 Enregistrer correction", use_container_width=True):
@@ -4009,7 +4084,7 @@ with tab_data:
 
             # Sélecteur du vin à afficher
             wine_names = sorted(df_ph["Nom"].unique())
-            sel_name = st.selectbox("Vin", wine_names, key="ph_select",
+            sel_name = st.selectbox("Vin", wine_names, key=f"ph_select_{slug}",
                                     label_visibility="collapsed")
             df_sel = df_ph[df_ph["Nom"] == sel_name].sort_values("Date")
 
@@ -4126,7 +4201,9 @@ if _console_visible:
         st.caption(f"🖥️ Console · {_n_lines} lignes")
     with _ch2:
         if _job_running_now:
-            st.caption("⚡ mise à jour toutes les ~2s")
+            _is_cross = _job_running_now and job.get("slug") != slug
+            _interval_label = "~4s" if _is_cross else "~1.5s"
+            st.caption(f"⚡ mise à jour toutes les {_interval_label}")
     with _ch3:
         if st.button("🗑️ Effacer", key="clear_console", use_container_width=True):
             try: JOB_LOG_PATH.write_text("", "utf-8")
