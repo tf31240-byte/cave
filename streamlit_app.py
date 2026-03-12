@@ -76,6 +76,21 @@ WINE_TYPES = {
     "🍾 Mousseux": "vins-mousseux-et-petillants",
 }
 
+# Clés de tri — définies une fois au niveau module pour éviter la recréation
+# de lambdas à chaque rerun Streamlit.
+SORTS: dict[str, object] = {
+    "Q/P 💰":  lambda x: (-(x.get("score") or 0),   -(x.get("rating") or 0)),
+    "Note ⭐":  lambda x: (-(x.get("rating") or 0),   -(x.get("score") or 0)),
+    "Prix ↑":  lambda x: ( (x.get("price") or 9999), -(x.get("score") or 0)),
+    "Prix ↓":  lambda x: (-(x.get("price") or 0),    -(x.get("score") or 0)),
+}
+_SORT_HELP: dict[str, str] = {
+    "Q/P 💰":  "Qualité/Prix : note × popularité ÷ prix.",
+    "Note ⭐":  "Note Vivino décroissante.",
+    "Prix ↑":  "Du moins cher au plus cher.",
+    "Prix ↓":  "Du plus cher au moins cher.",
+}
+
 # mapping slug Leclerc → wine_type_id Vivino (1=rouge, 2=blanc, 3=mousseux, 4=rosé)
 # FIX : vins-roses était 7 (dessert) au lieu de 4 (rosé)
 VIVINO_TYPE_IDS: dict[str, int] = {
@@ -633,9 +648,6 @@ _GIST_FILES = {
     "vivino_rejections.json",
 }
 
-_gist_push_lock = threading.Lock()
-
-
 def _gist_headers() -> dict:
     return {
         "Authorization": f"token {_GIST_TOKEN}",
@@ -951,6 +963,7 @@ def save_vivino_rejection(wine_name: str, query: str, rejected_url: str,
         data_str = json.dumps(data, ensure_ascii=False, indent=2)
         tmp.write_text(data_str, "utf-8")
         tmp.replace(REJECTION_LOG_PATH)
+        _invalidate_mem_cache(REJECTION_LOG_PATH)
         _gist_push_async(REJECTION_LOG_PATH.name, data_str)  # persistance cloud
     except Exception:
         pass
@@ -1154,7 +1167,7 @@ def start_background_job(slug: str, mode: str) -> bool:
     global _job_thread
     with _job_lock:
         current = load_job_state()
-        if current.get("status") == "running":
+        if current.get("status") in {"running", "queued"}:
             return False
         save_job_state({
             "status": "queued",
@@ -1309,14 +1322,14 @@ def _fuzzy_match(query: str, target: str) -> bool:
     if q in t:
         return True
     # 2. Tous les mots présents (tolère ordre différent et tirets)
-    t_words = re.sub(r"[^a-z0-9 ]", " ", t)
+    t_words = _NON_ALPHANUM_RE.sub(" ", t)
     words = q.split()
     if len(words) > 1 and all(w in t_words for w in words):
         return True
     # 3. Bigrammes (tolérance aux fautes de frappe courtes)
     if len(q) >= 5:
         def bigrams(s): return {s[i:i+2] for i in range(len(s) - 1)}
-        bq, bt = bigrams(re.sub(r"[^a-z]", "", q)), bigrams(re.sub(r"[^a-z]", "", t))
+        bq, bt = bigrams(_NONALPHA_RE.sub("", q)), bigrams(_NONALPHA_RE.sub("", t))
         if bq and len(bq & bt) / len(bq) >= 0.70:
             return True
     return False
@@ -1325,7 +1338,7 @@ def _fuzzy_match(query: str, target: str) -> bool:
 _REGIONS_NORM: list[tuple[str, str]] = [(r, _norm_ascii(r)) for r in _REGIONS]
 
 def extract_region(wine_name: str) -> str:
-    m = re.search(r"-\s*([\w\s\-\']+?)\s*(?:AOP|IGP|AOC|AOP-AOC)\b", wine_name, re.I)
+    m = _REGION_AOP_RE.search(wine_name)
     if m:
         raw = m.group(1).strip()
         raw_n = _norm_ascii(raw)
@@ -1351,6 +1364,17 @@ def vivino_cache_type(entry: dict) -> str:
         return "manuel"
     return "auto"
 
+# Champs Vivino enrichis — définis au niveau module (évite recréation tuple à chaque appel _merge_vivino)
+_VIVINO_FIELDS: tuple = (
+    "rating", "ratings_count", "ratings_count_all",
+    "vivino_url", "vivino_year", "vintage_match", "match_confidence",
+    "vivino_name", "winery", "vivino_region", "vivino_region_seo",
+    "country", "grapes", "style_name", "is_natural",
+    "acidity", "tannin", "sweetness", "body",
+)
+# Champs numériques qui valent 0 (pas None) par défaut dans les resets suppressed/defaults
+_VIVINO_COUNT_FIELDS = frozenset({"ratings_count", "ratings_count_all"})
+
 def _merge_vivino(wines: list, vc: dict, ph: dict | None = None) -> list:
     """
     Injecte données Vivino + calcule score/région/tendance prix.
@@ -1360,14 +1384,6 @@ def _merge_vivino(wines: list, vc: dict, ph: dict | None = None) -> list:
     is_natural, acidity, tannin, sweetness, body, ratings_count_all
     """
     if ph is None: ph = {}
-    # Champs Vivino enrichis à propager depuis le cache
-    _VIVINO_FIELDS = (
-        "rating", "ratings_count", "ratings_count_all",
-        "vivino_url", "vivino_year", "vintage_match", "match_confidence",
-        "vivino_name", "winery", "vivino_region", "vivino_region_seo",
-        "country", "grapes", "style_name", "is_natural",
-        "acidity", "tannin", "sweetness", "body",
-    )
     result = []
     for w in wines:
         w = dict(w)
@@ -1376,7 +1392,7 @@ def _merge_vivino(wines: list, vc: dict, ph: dict | None = None) -> list:
         w.setdefault("available", True)
         if cv.get("suppressed"):
             for f in _VIVINO_FIELDS:
-                w[f] = [] if f == "grapes" else (0 if f in ("ratings_count","ratings_count_all") else None)
+                w[f] = [] if f == "grapes" else (0 if f in _VIVINO_COUNT_FIELDS else None)
             w["vivino_url"] = ""
         elif cv.get("rating") is not None or cv.get("vivino_url"):
             for f in _VIVINO_FIELDS:
@@ -1385,7 +1401,7 @@ def _merge_vivino(wines: list, vc: dict, ph: dict | None = None) -> list:
         # Defaults pour les champs manquants
         for f in _VIVINO_FIELDS:
             if f not in w:
-                w[f] = [] if f == "grapes" else (0 if f in ("ratings_count","ratings_count_all") else None)
+                w[f] = [] if f == "grapes" else (0 if f in _VIVINO_COUNT_FIELDS else None)
         w.setdefault("vivino_url", "")
         w["score"]       = compute_score(w.get("rating"), w.get("ratings_count"),
                                           w.get("price"), w.get("vintage_match"))
@@ -1427,7 +1443,7 @@ def _parse_price(card) -> float:
     # Pattern 1 : bloc dédié prix + dispo
     blk = card.find(class_=lambda c: c and "block-price-and-availability" in c.split())
     if blk:
-        m = re.search(r"(\d+)[€\s]*[,.](\d{2})", blk.get_text())
+        m = _PRICE_CSS1_RE.search(blk.get_text())
         if m: return float(f"{m.group(1)}.{m.group(2)}")
 
     # Pattern 2 : classes price-unit + price-cents (ancienne structure)
@@ -1450,7 +1466,7 @@ def _parse_price(card) -> float:
     for el in card.find_all(class_=lambda c: c and any(
             p in " ".join(c.split()).lower() for p in ("price", "prix", "amount"))):
         txt = el.get_text(strip=True)
-        m = re.search(r"(\d+)[,.](\d{2})", txt)
+        m = _PRICE_CSS2_RE.search(txt)
         if m:
             try:
                 val = float(f"{m.group(1)}.{m.group(2)}")
@@ -1460,7 +1476,7 @@ def _parse_price(card) -> float:
 
     # Pattern 5 (fallback ultime) : regex XX,XX € n'importe où dans le HTML de la carte
     # Robuste à tout changement CSS — on cherche le premier montant plausible
-    for m in re.finditer(r"(?<![0-9])(\d{1,3})[,.](\d{2})\s*€", card.get_text()):
+    for m in _PRICE_FALLBACK_RE.finditer(card.get_text()):
         try:
             val = float(f"{m.group(1)}.{m.group(2)}")
             if 1.0 <= val <= 999.0:
@@ -1469,38 +1485,51 @@ def _parse_price(card) -> float:
 
     return 0.0
 
-def parse_cards(html: str) -> list:
+def parse_page(html: str) -> tuple[list, int]:
+    """
+    Parse une page Leclerc en une seule passe BeautifulSoup.
+    Retourne (wines: list[dict], nb_pages: int).
+    Évite de parser le même HTML deux fois (parse_cards puis get_nb_pages).
+    """
+    soup  = BeautifulSoup(html, "html.parser")
     wines = []
-    for card in BeautifulSoup(html, "html.parser").find_all("app-product-card"):
+    for card in soup.find_all("app-product-card"):
         lbl  = card.find(class_="product-label")
         name = lbl.get_text(strip=True) if lbl else ""
         if not name: continue
         lnk  = card.find("a", href=True)
         href = lnk["href"] if lnk else ""
         url  = href if href.startswith("http") else f"https://www.e.leclerc{href}"
-        em   = re.search(r"offer_m-(\d{13})-\d+", card.decode_contents())
+        em   = _EAN_OFFER_RE.search(card.decode_contents())
         ean  = em.group(1) if em else ""
         if not ean:
-            m2 = re.search(r"-(\d{13})$", url)
+            m2 = _EAN_URL_RE.search(url)
             ean = m2.group(1) if m2 else ""
         img   = card.find("img")
         image = ""
         if img:
             image = img.get("src") or img.get("data-src") or \
                     img.get("data-srcset", "").split()[0] or ""
-        ym = re.search(r"\b(19[5-9]\d|20[0-3]\d)\b", name)
+        ym = _CARD_VINTAGE_RE.search(name)
         wines.append({"name": name, "price": _parse_price(card),
                       "url": url, "ean": ean, "image": image,
                       "vintage":     int(ym.group(1)) if ym else None,
                       "grapes_hint": extract_grapes_from_name(name),
                       "volume_cl":   extract_volume_cl(name)})
-    return wines
+    nums = [int(m.group(1))
+            for a in soup.find_all("a", href=True)
+            if (m := _PAGE_NUM_RE.search(a["href"]))]
+    return wines, (max(nums) if nums else 1)
+
+
+def parse_cards(html: str) -> list:
+    """Extrait uniquement les cartes produit (sans pagination). Voir parse_page() pour l'usage combiné."""
+    return parse_page(html)[0]
+
 
 def get_nb_pages(html: str) -> int:
-    nums = [int(m.group(1))
-            for a in BeautifulSoup(html, "html.parser").find_all("a", href=True)
-            if (m := re.search(r"[?&]page=(\d+)", a["href"]))]
-    return max(nums) if nums else 1
+    """Nombre de pages de résultats. Voir parse_page() pour l'usage combiné."""
+    return parse_page(html)[1]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1555,6 +1584,8 @@ _GENERIC_APPELLATIONS = {
     # Appellations mono-mot qui matchent trop facilement
     "pomerol", "margaux", "medoc", "graves", "sancerre",
     "chablis", "beaujolais", "muscadet", "cahors", "madiran",
+    # Effervescents — query mono-mot trop générique
+    "champagne", "prosecco", "cava",
 }
 
 # ── Amélioration 5 : cépages connus ────────────────────────────────────────
@@ -1644,11 +1675,54 @@ def _clean_tail(s: str) -> str:
     return s
 
 
+# Regex compilées pour build_query — évite la recompilation à chaque appel
+_YEAR_RE      = re.compile(r"\b(19|20)\d{2}\b")
+_AOC_RE       = re.compile(r"\s*\b(AOP|IGP|AOC|A\.O\.P|A\.O\.C|I\.G\.P)\b\.?", re.I)
+_ALLCAPS_RE   = re.compile(r"^[A-Z][A-Z\s\'\-]+$")
+_MULTISPC_RE  = re.compile(r"\s{2,}")
+_NONALPHA_RE  = re.compile(r"[^a-z]")   # utilisé dans _name_similarity bigrams
+
+# Ensembles de mots-coupure pour build_query étape 7 — évite la recréation dict à chaque appel
+_BQ_CUT             = frozenset({"Cuvée", "Cuvee", "Vieilles", "Vieille", "Vignes"})
+_BQ_CUT_AFTER_GRANDE = frozenset({"Cuvée", "Cuvee", "Réserve", "Reserve", "Tradition"})
+
 # Précalculé au niveau module — utilisé dans build_query (évite recompilation à chaque appel)
 _VOLUME_PREFIX_RE = re.compile(
     r"^(" + "|".join(re.escape(k) for k in sorted(_VOLUME_MAP, key=len, reverse=True)) + r")\s+",
     re.I,
 )
+
+# ── Regex compilées (hot paths) ────────────────────────────────────────────
+# parse_page : appelées sur chaque carte/ancre de chaque page Leclerc
+_CARD_VINTAGE_RE = re.compile(r"\b(19[5-9]\d|20[0-3]\d)\b")
+_EAN_OFFER_RE    = re.compile(r"offer_m-(\d{13})-\d+")
+_EAN_URL_RE      = re.compile(r"-(\d{13})$")
+_PAGE_NUM_RE     = re.compile(r"[?&]page=(\d+)")
+# _parse_price fallback ultime (pattern 5)
+_PRICE_FALLBACK_RE = re.compile(r"(?<![0-9])(\d{1,3})[,.](\d{2})\s*€")
+# _parse_price patterns 1 & 2 — present dans le sous-bloc CSS price
+_PRICE_CSS1_RE    = re.compile(r"(\d+)[€\s]*[,.](\d{2})")
+_PRICE_CSS2_RE    = re.compile(r"(\d+)[,.](\d{2})")
+# fetch_vivino_selenium : année dans l'URL courante
+_VIVINO_YEAR_URL_RE = re.compile(r"[?&]year=(\d{4})")
+# _norm_words : appelée dans _name_similarity, _fallback_queries, etc.
+_WORDS3_RE = re.compile(r"[a-z]{3,}")
+# extract_region word cleaning
+_NON_ALPHANUM_RE = re.compile(r"[^a-z0-9 ]")
+# extract_region : regex AOP/IGP après tiret
+_REGION_AOP_RE   = re.compile(r"-\s*([\w\s\-\']+?)\s*(?:AOP|IGP|AOC|AOP-AOC)\b", re.I)
+# vivino_candidates_from_search : filtre hrefs résultats de recherche
+_VIVINO_WINE_HREF_RE = re.compile(r"/w(?:ines)?/[^/?&#\s]+")
+# fetch_vivino : extraction JSON fallback depuis HTML brut
+_VIVINO_AVG_RE    = re.compile(r'"ratings_average"\s*:\s*([\d.]+)')
+_VIVINO_CNT_RE    = re.compile(r'"ratings_count"\s*:\s*(\d+)')
+# Nettoyage de caractères non-chiffres
+_NON_DIGIT_RE     = re.compile(r"[^\d]")
+# Barre de progression dans la console job : [N/Total]
+_PROGRESS_RE      = re.compile(r"\[(\d+)/(\d+)\]")
+# _extract_year : utilisée dans vivino_candidates_from_search (1× par titre candidat)
+# → réutilise _YEAR_RE déjà compilé (r"\b(19|20)\d{2}\b") ✓
+
 
 def extract_volume_cl(wine_name: str) -> float:
     """
@@ -1689,18 +1763,18 @@ def build_query(wine_name: str) -> str:
         nom = nom_stripped
 
     # Étape 3 : supprimer l'année
-    nom = re.sub(r"\b(19|20)\d{2}\b", "", nom).strip().strip("-").strip()
+    nom = _YEAR_RE.sub("", nom).strip().strip("-").strip()
 
     # Étape 4 : supprimer AOP/IGP/AOC/Vin de France où qu'ils soient
-    nom = re.sub(r"\s*\b(AOP|IGP|AOC|A\.O\.P|A\.O\.C|I\.G\.P)\b\.?", "", nom, flags=re.I).strip()
+    nom = _AOC_RE.sub("", nom).strip()
 
     # Étape 5 : normalisation casse (tout-majuscule → Title Case)
-    if re.match(r"^[A-Z][A-Z\s\'\-]+$", nom):
+    if _ALLCAPS_RE.match(nom):
         nom = nom.title()
 
     # Étape 6 : supprimer les mots parasites (couleur, termes de vinif…)
     nom_clean = _NOISE_WORDS.sub(" ", nom).strip()
-    nom_clean = re.sub(r"\s{2,}", " ", nom_clean).strip()
+    nom_clean = _MULTISPC_RE.sub(" ", nom_clean).strip()
     # N'appliquer que si le résultat n'est pas trop court
     if len(nom_clean.split()) >= 2:
         nom = nom_clean
@@ -1711,14 +1785,12 @@ def build_query(wine_name: str) -> str:
     # Étape 7 : couper avant les mots-coupure (Cuvée, Vieilles Vignes…)
     # "Grande" ne coupe que si suivi d'un autre descripteur de cuvée (Cuvée, Réserve…)
     # afin de ne pas tronquer des noms propres comme "Domaine de la Grande Bellane".
-    _CUT = {"Cuvée", "Cuvee", "Vieilles", "Vieille", "Vignes"}
-    _CUT_AFTER_GRANDE = {"Cuvée", "Cuvee", "Réserve", "Reserve", "Tradition"}
     words = nom.split()
     for i, w in enumerate(words[2:], 2):
-        if w in _CUT:
+        if w in _BQ_CUT:
             nom = " ".join(words[:i])
             break
-        if w == "Grande" and i + 1 < len(words) and words[i + 1] in _CUT_AFTER_GRANDE:
+        if w == "Grande" and i + 1 < len(words) and words[i + 1] in _BQ_CUT_AFTER_GRANDE:
             nom = " ".join(words[:i])
             break
 
@@ -1740,11 +1812,17 @@ def build_query(wine_name: str) -> str:
     return result if len(result) > 2 else wine_name[:40].strip()
 
 
+# _norm_words stop-words — défini une fois au niveau module (évite recréation set à chaque appel)
+_STOP_WORDS = frozenset({
+    "de","du","des","le","la","les","et","au","aux","en","par","sur",
+    "un","une","the","of","and","for","vin","wines","wine",
+    "rouge","blanc","rose","rosé","sec","brut",
+})
+# Préfixes producteur exclus du calcul de pénalité premier-mot
+_NAME_PREFIX_STOP = frozenset({"chateau","domaine","maison","cave","les","de","du"})
+
 def _norm_words(s: str) -> set:
-    STOP = {"de","du","des","le","la","les","et","au","aux","en","par","sur",
-            "un","une","the","of","and","for","vin","wines","wine",
-            "rouge","blanc","rose","rosé","sec","brut"}  # couleurs ajoutées au stop
-    return {w for w in re.findall(r"[a-z]{3,}", _norm_ascii(s)) if w not in STOP}
+    return {w for w in _WORDS3_RE.findall(_norm_ascii(s)) if w not in _STOP_WORDS}
 
 
 def _name_similarity(name1: str, name2: str) -> float:
@@ -1763,7 +1841,7 @@ def _name_similarity(name1: str, name2: str) -> float:
     jaccard = len(w1 & w2) / len(w1 | w2)
 
     def bigrams(s):
-        a = re.sub(r"[^a-z]", "", _norm_ascii(s))
+        a = _NONALPHA_RE.sub("", _norm_ascii(s))
         return {a[i:i+2] for i in range(len(a)-1)} if len(a) > 1 else set()
     bg1, bg2  = bigrams(name1), bigrams(name2)
     bg_score  = len(bg1 & bg2) / len(bg1 | bg2) if (bg1 | bg2) else 0.0
@@ -1783,8 +1861,8 @@ def _name_similarity(name1: str, name2: str) -> float:
     # Pénalité 1er mot absent : le 1er mot significatif de la query (hors "chateau")
     # doit être présent dans le titre Vivino
     first_word_penalty = 0.0
-    w1_ordered = [w for w in re.findall(r"[a-z]{3,}", _norm_ascii(name1))
-                  if w not in {"chateau","domaine","maison","cave","les","de","du"}]
+    w1_ordered = [w for w in _WORDS3_RE.findall(_norm_ascii(name1))
+                  if w not in _NAME_PREFIX_STOP]
     if w1_ordered:
         first_sig = w1_ordered[0]
         if len(first_sig) >= 4 and first_sig not in w2:
@@ -1804,7 +1882,7 @@ def _safe_year(val) -> int | None:
         return None
 
 def _extract_year(text: str) -> int | None:
-    m = re.search(r"\b(19|20)\d{2}\b", text or "")
+    m = _YEAR_RE.search(text or "")
     return int(m.group(0)) if m else None
 
 
@@ -1822,7 +1900,7 @@ def vivino_candidates_from_search(html: str, max_candidates: int = VIVINO_CANDID
     for a in soup.find_all("a", href=True):
         href = a["href"]
         # ① CORRIGÉ : regex étendue pour les URLs slug-based
-        if not re.search(r"/w(?:ines)?/[^/?&#\s]+", href) or "search" in href:
+        if not _VIVINO_WINE_HREF_RE.search(href) or "search" in href:
             continue
         url = href if href.startswith("http") else f"https://www.vivino.com{href}"
         if url in seen:
@@ -2135,17 +2213,17 @@ def parse_wine_jsonld(html: str) -> dict:
                     v = round(float(str(rv).replace(",",".")), 1)
                     if 2.5 <= v <= 5.0: rating = v
                 if rc:
-                    count = int(re.sub(r"[^\d]", "", str(rc)) or 0)
+                    count = int(_NON_DIGIT_RE.sub("", str(rc)) or 0)
                 if rating: break
         except Exception: pass
         if rating: break
     if not rating:
-        m = re.search(r'"ratings_average"\s*:\s*([\d.]+)', html)
+        m = _VIVINO_AVG_RE.search(html)
         if m:
             v = round(float(m.group(1)), 1)
             if 2.5 <= v <= 5.0: rating = v
     if not count:
-        m = re.search(r'"ratings_count"\s*:\s*(\d+)', html)
+        m = _VIVINO_CNT_RE.search(html)
         if m: count = int(m.group(1))
     if not rating:
         for el in soup.find_all(class_=lambda c: c and "averageValue" in c):
@@ -2155,7 +2233,7 @@ def parse_wine_jsonld(html: str) -> dict:
             except ValueError: pass
     if not count:
         for el in soup.find_all(class_=lambda c: c and "numRatings" in c):
-            d = re.sub(r"[^\d]", "", el.get_text())
+            d = _NON_DIGIT_RE.sub("", el.get_text())
             if d: count = int(d); break
     return {"rating": rating, "ratings_count": count}
 
@@ -2237,9 +2315,10 @@ def scrape_leclerc_full(slug: str, log=None) -> list:
             EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card")))
         except Exception: pass
         time.sleep(3)
-        html = driver.page_source
-        nb   = min(get_nb_pages(html), MAX_PAGES)
-        for w in parse_cards(html):
+        html      = driver.page_source
+        p1_wines, nb = parse_page(html)
+        nb = min(nb, MAX_PAGES)
+        for w in p1_wines:
             # Bug 1 fix : ean='' n'est pas un identifiant unique — on déduplique
             # sur (ean or name) pour éviter que tous les vins sans EAN soient écrasés
             key = w["ean"] or w["name"]
@@ -2288,7 +2367,12 @@ def check_availability(slug: str, cached_wines: list, log=None) -> list:
             except Exception: pass
             time.sleep(1.5)
             page_src = driver.page_source
-            page_w   = parse_cards(page_src)
+            # Fix 11b : page 1 → parse_page() récupère cartes + nb_pages en un seul BS parse
+            if p == 1:
+                page_w, _nb = parse_page(page_src)
+                nb_pages = min(_nb, MAX_PAGES)
+            else:
+                page_w = parse_cards(page_src)
             if not page_w:
                 if log: log(f"⚠️ Page {p} vide — arrêt du scraping stock")
                 break
@@ -2296,9 +2380,6 @@ def check_availability(slug: str, cached_wines: list, log=None) -> list:
             # marquerait TOUS les vins sans EAN comme disponibles à tort
             current_eans.update(w["ean"] for w in page_w if w.get("ean"))
             if log: log(f"  ✅ Page {p} : {len(page_w)} vins ({len(current_eans)} EAN collectés)")
-            # Fix 11b : lit le nb de pages réel depuis la page 1
-            if p == 1:
-                nb_pages = min(get_nb_pages(page_src), MAX_PAGES)
             if p >= nb_pages: break
     except Exception as e:
         if log: log(f"⚠️ Vérif. stock échouée : {e}")
@@ -2410,7 +2491,7 @@ def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", reg
         return EMPTY
 
     vy = None
-    m = re.search(r"[?&]year=(\d{4})", driver.current_url)
+    m = _VIVINO_YEAR_URL_RE.search(driver.current_url)
     if m:
         vy = _safe_year(m.group(1))
     elif best.get("year"):
@@ -2482,6 +2563,12 @@ def _api_lookup_wine(wine: dict, slug: str,
     return key, region, result
 
 
+def _make_vc_entry(data: dict) -> dict:
+    """Wraps un résultat Vivino avec les métadonnées de cache standard."""
+    return {**data, "cached_at": time.time(),
+            "locked": False, "manual_override": False, "suppressed": False}
+
+
 def _scrape_vivino_list(slug, wines, todo, vc, log):
     """
     Boucle de scraping Vivino avec stratégie deux phases :
@@ -2501,13 +2588,17 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
     interrupted = False
     driver = None
 
-    # ── Séparer vins verrouillés / à traiter (build_query 1× par vin) ───────
+    # ── Précalculer build_query une seule fois pour chaque vin ───────────────
+    # Évite 5-7 appels build_query par vin dans la boucle de scraping.
+    _key_of: dict[int, str] = {id(w): build_query(w["name"]) for w in todo}
+
+    # ── Séparer vins verrouillés / à traiter ─────────────────────────────────
     locked, to_process = [], []
     for _w in todo:
-        (locked if vc.get(build_query(_w["name"]), {}).get("locked") else to_process).append(_w)
+        (locked if vc.get(_key_of[id(_w)], {}).get("locked") else to_process).append(_w)
 
     for w in locked:
-        ean = w.get("ean") or build_query(w["name"])
+        ean = w.get("ean") or _key_of[id(w)]
         ckpt_tick(slug, ean)   # Fix 2 : enregistré dans done_eans → sauté proprement en cas de reprise
         done_count += 1
         if log: log(f"  🔒 [{done_count}/{len(wines)}] {w['name'][:38]} (correction manuelle conservée)")
@@ -2519,7 +2610,7 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
 
     # Charger les rejets 1× pour toute la session de scraping
     _rejections = load_vivino_rejections()
-    n_skip_hard = sum(1 for w in to_process if is_hard_to_match(build_query(w["name"]), _rejections))
+    n_skip_hard = sum(1 for w in to_process if is_hard_to_match(_key_of[id(w)], _rejections))
     if n_skip_hard and log:
         log(f"  ⚠️ {n_skip_hard} vins skippés (trop de rejets précédents)")
 
@@ -2534,25 +2625,22 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
                 api_results[key] = (region, res)
             except Exception:
                 w = futures[fut]
-                api_results[build_query(w["name"])] = ("", None)
+                api_results[_key_of[id(w)]] = ("", None)
 
     # Accepter les résultats API de bonne qualité
     need_selenium: list[tuple[dict, str]] = []   # (wine, region)
     for w in to_process:
-        key          = build_query(w["name"])
+        key          = _key_of[id(w)]
         region, res  = api_results.get(key, ("", None))
         ean          = w.get("ean") or key
         conf         = (res or {}).get("match_confidence") or 0
         if res and (res.get("rating") or (res.get("vivino_url") and conf >= VIVINO_SIMILARITY_MIN)):
-            # Fix 6 : cached_at au moment réel de la récupération, pas au début du scrape
-            vc[key] = {**res, "cached_at": time.time(), "locked": False,
-                       "manual_override": False, "suppressed": False}
+            vc[key] = _make_vc_entry(res)
             ckpt_tick(slug, ean)
             done_count += 1
             found += bool(res.get("rating"))
             if log and res.get("rating"):
-                cnt_s = f"{res['ratings_count']:,}".replace(",", "\u202f") if res.get("ratings_count") else "—"
-                log(f"  ⚡ [{done_count}/{len(wines)}] {w['name'][:40]} ★ {res['rating']} · {cnt_s}")
+                log(f"  ⚡ [{done_count}/{len(wines)}] {w['name'][:40]} ★ {res['rating']} · {fmt_count(res.get('ratings_count'))}")
             # Sauvegarde incrémentale tous les 10 résultats → le polling temps réel
             # voit les nouvelles notes au fur et à mesure (pas seulement à la fin)
             if done_count % 10 == 0:
@@ -2574,21 +2662,17 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
     try:
         driver = make_driver()
         for wine, region in need_selenium:    # Fix 13 : region déjà calculée en Phase 1
-            key = build_query(wine["name"])
+            key = _key_of[id(wine)]
             ean = wine.get("ean") or key
             vd  = fetch_vivino(driver, wine["name"], wine.get("vintage"),
                                slug=slug, region=region)
-            # Fix 6 : timestamp réel, pas now figé au début
-            vc[key] = {**vd, "cached_at": time.time(), "locked": False,
-                       "manual_override": False, "suppressed": False}
+            vc[key] = _make_vc_entry(vd)
             ckpt_tick(slug, ean)
             done_count += 1
             if vd.get("rating"):
                 found += 1
-                cnt_s = f"{vd['ratings_count']:,}".replace(",", "\u202f") \
-                        if vd["ratings_count"] else "—"
                 if log: log(f"  ✅ [{done_count}/{len(wines)}] {wine['name'][:38]}\n"
-                            f"     ★ {vd['rating']} · {cnt_s} avis")
+                            f"     ★ {vd['rating']} · {fmt_count(vd.get('ratings_count'))} avis")
                 # Sauvegarde immédiate après chaque note trouvée → visible au prochain rerun
                 save_vivino_cache(vc, slug)
             else:
@@ -2653,8 +2737,11 @@ def repair_zero_prices(slug: str, log=None) -> int:
             time.sleep(3)
             html = driver.page_source
             if p == 1:
-                nb_pages = min(get_nb_pages(html), MAX_PAGES)
-            for card_w in parse_cards(html):
+                _cards, _nb = parse_page(html)
+                nb_pages = min(_nb, MAX_PAGES)
+            else:
+                _cards = parse_cards(html)
+            for card_w in _cards:
                 if card_w.get("price") and card_w["price"] > 0:
                     if card_w.get("ean"):
                         fresh_by_ean[card_w["ean"]] = card_w["price"]
@@ -2754,32 +2841,13 @@ def run_refresh_vivino(slug: str, resume: bool = False, log=None) -> list:
     return _merge_vivino(wines, vc, load_price_history())
 
 
-def run_fill_missing_vivino(slug: str, log=None) -> list:
-    """Scrape uniquement les vins sans note ET sans URL Vivino."""
-    lc = load_leclerc_cache(slug)
-    if not lc:
-        if log: log("❌ Pas de cache Leclerc. Lancez d'abord 🔄 Vérifier disponibilité.")
-        return []
-    vc    = load_vivino_cache(slug)
-    wines = [dict(w) for w in lc["wines"]]  # copie — ne mute pas lc["wines"]
-    for w in wines: w.setdefault("available", True)
-    missing = []
-    for w in wines:
-        key   = build_query(w["name"])
-        entry = vc.get(key, {})
-        if not entry.get("locked") and not entry.get("rating") and not entry.get("vivino_url"):
-            missing.append(w)
-    if not missing:
-        if log: log("✅ Tous les vins ont déjà une note ou un lien Vivino !")
-        return _merge_vivino(wines, vc, load_price_history())
-    if log: log(f"🔍 {len(missing)}/{len(wines)} vins sans données Vivino…")
-    ckpt_create(slug, len(missing))
-    _scrape_vivino_list(slug, missing, missing, vc, log)
-    return _merge_vivino(wines, vc, load_price_history())
+def _run_vivino_subset(slug: str, selector, empty_msg: str, count_msg, log=None) -> list:
+    """
+    Facteur commun pour run_fill_missing_vivino et run_refresh_stale_vivino.
 
-
-def run_refresh_stale_vivino(slug: str, log=None) -> list:
-    """Rafraîchit uniquement les entrées Vivino marquées obsolètes (> TTL jours)."""
+    selector(wines, vc) → list[dict]  sous-ensemble à scraper.
+    load_price_history est appelé une seule fois, qu'il y ait scraping ou non.
+    """
     lc = load_leclerc_cache(slug)
     if not lc:
         if log: log("❌ Pas de cache Leclerc. Lancez d'abord 🔄 Vérifier disponibilité.")
@@ -2787,15 +2855,44 @@ def run_refresh_stale_vivino(slug: str, log=None) -> list:
     vc    = load_vivino_cache(slug)
     wines = [dict(w) for w in lc["wines"]]
     for w in wines: w.setdefault("available", True)
-    stale = [w for w in wines
-             if vc.get(build_query(w["name"]), {}).get("_stale")]
-    if not stale:
-        if log: log(f"✅ Aucune entrée obsolète (TTL = {VIVINO_CACHE_TTL_DAYS} jours) !")
-        return _merge_vivino(wines, vc, load_price_history())
-    if log: log(f"⏳ {len(stale)} entrées obsolètes à rafraîchir…")
-    ckpt_create(slug, len(stale))
-    _scrape_vivino_list(slug, stale, stale, vc, log)
-    return _merge_vivino(wines, vc, load_price_history())
+    ph     = load_price_history()          # 1× — évite le double appel branch/fin
+    subset = selector(wines, vc)
+    if not subset:
+        if log: log(empty_msg)
+        return _merge_vivino(wines, vc, ph)
+    if log: log(count_msg(subset, wines))
+    ckpt_create(slug, len(subset))
+    _scrape_vivino_list(slug, subset, subset, vc, log)
+    return _merge_vivino(wines, vc, ph)
+
+
+def run_fill_missing_vivino(slug: str, log=None) -> list:
+    """Scrape uniquement les vins sans note ET sans URL Vivino."""
+    def _sel(wines, vc):
+        result = []
+        for w in wines:
+            e = vc.get(build_query(w["name"]), {})
+            if not e.get("locked") and not e.get("rating") and not e.get("vivino_url"):
+                result.append(w)
+        return result
+    return _run_vivino_subset(
+        slug, _sel,
+        "✅ Tous les vins ont déjà une note ou un lien Vivino !",
+        lambda s, w: f"🔍 {len(s)}/{len(w)} vins sans données Vivino…",
+        log,
+    )
+
+
+def run_refresh_stale_vivino(slug: str, log=None) -> list:
+    """Rafraîchit uniquement les entrées Vivino marquées obsolètes (> TTL jours)."""
+    def _sel(wines, vc):
+        return [w for w in wines if vc.get(build_query(w["name"]), {}).get("_stale")]
+    return _run_vivino_subset(
+        slug, _sel,
+        f"✅ Aucune entrée obsolète (TTL = {VIVINO_CACHE_TTL_DAYS} jours) !",
+        lambda s, _: f"⏳ {len(s)} entrées obsolètes à rafraîchir…",
+        log,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2805,6 +2902,10 @@ def run_refresh_stale_vivino(slug: str, log=None) -> list:
 def stars(r: float) -> str:
     r = max(0.0, min(5.0, float(r or 0)))
     return "".join("★" if r >= i else ("½" if r >= i - .5 else "☆") for i in range(1, 6))
+
+# Constantes de rendu — définies une fois, partagées entre toutes les cartes
+_RANK_CLS  = {1: "top1", 2: "top2", 3: "top3"}
+_RANK_ICON = {1: "🥇",   2: "🥈",   3: "🥉"}
 
 def fmt_count(n) -> str:
     """Formate un nombre d'avis. Coerce silencieusement float → int, str → int."""
@@ -2818,11 +2919,11 @@ def fmt_count(n) -> str:
 
 
 def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
-    cls = {1:"top1",2:"top2",3:"top3"}.get(rank, "")
+    cls  = _RANK_CLS.get(rank, "")
     if wine.get("vintage_match") is False: cls = (cls + " vintage-warn").strip()
     if not wine.get("available", True):    cls = (cls + " unavailable").strip()
     if wine.get("_stale"):                 cls = (cls + " stale").strip()
-    icon = {1:"🥇",2:"🥈",3:"🥉"}.get(rank, f"<span style='font-size:.75rem'>#{rank}</span>")
+    icon = _RANK_ICON.get(rank, f"<span style='font-size:.75rem'>#{rank}</span>")
 
     # XSS : toutes les valeurs utilisateur échappées avant injection HTML
     name     = _html.escape(wine["name"])
@@ -2934,6 +3035,9 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
             f'</div>')
 
 
+_VINTAGE_MATCH_LABEL = {True: "✅", False: "⚠️", None: "—"}
+
+
 def _make_wines_df(ws: list) -> "pd.DataFrame":
     """
     Fix I : fonction top-level (plus de redéfinition à chaque render dans tab_export).
@@ -2960,7 +3064,7 @@ def _make_wines_df(ws: list) -> "pd.DataFrame":
         "Sucrosité":        w.get("sweetness") or "",
         "Corps":            w.get("body") or "",
         "Mil. Vivino":      w.get("vivino_year") or "",
-        "Mil. OK":          {True: "✅", False: "⚠️", None: "—"}.get(w.get("vintage_match"), "—"),
+        "Mil. OK":          _VINTAGE_MATCH_LABEL.get(w.get("vintage_match"), "—"),
         "Dispo":            "✅" if w.get("available", True) else "⛔",
         "Leclerc":          w.get("url") or "",
         "Vivino":           w.get("vivino_url") or "",
@@ -3075,24 +3179,25 @@ if _early_job.get("status") in {"running", "queued"}:
 # Déclencher le rerun ici (avant tout rendu) garantit que les onglets
 # reçoivent les données fraîches chargées ci-dessus, et non les données
 # du cycle précédent.
+_cur_slug     = st.session_state.get("loaded_slug")   # cache — accédé 4× ci-dessous
 _auto_live_on = st.session_state.get("auto_live", True)
 # _job_is_live : job actif sur le slug que l'utilisateur consulte → rerun rapide 1.5s
 _job_is_live  = (
     _early_job.get("status") in {"running", "queued"}
-    and _early_job.get("slug") == st.session_state.get("loaded_slug")
+    and _early_job.get("slug") == _cur_slug
 )
 # _job_cross_slug : job actif sur un AUTRE slug → rerun lent 4s (pour rafraîchir
 # la barre de progression + console sans risquer une oscillation de l'UI, puisque
 # FIX A empêche désormais l'écrasement du loaded_slug par le slug du job).
 _job_cross_slug = (
     _early_job.get("status") in {"running", "queued"}
-    and _early_job.get("slug") != st.session_state.get("loaded_slug")
+    and _early_job.get("slug") != _cur_slug
 )
 # Continuer le rerun 6s après la fin du job pour capturer les dernières lignes de log
 _job_just_done = (
     _early_job.get("status") in {"done", "error"}
     and time.time() - (_early_job.get("finished_at") or 0) < 6.0
-    and _early_job.get("slug") == st.session_state.get("loaded_slug")
+    and _early_job.get("slug") == _cur_slug
 )
 if _auto_live_on and (_job_is_live or _job_just_done or _job_cross_slug):
     _now_top = time.time()
@@ -3124,12 +3229,14 @@ with st.sidebar:
     if lc:
         n_total = len(lc["wines"])
         _session_wines = st.session_state.get("wines") or []
-        if _session_wines and st.session_state.get("loaded_slug") == slug:
+        if _session_wines and _cur_slug == slug:
             n_rated   = sum(1 for w in _session_wines if w.get("rating"))
             n_missing = n_total - n_rated
         else:
-            n_rated   = sum(1 for w in lc["wines"]
-                            if vc.get(build_query(w["name"]), {}).get("rating"))
+            # Chemin froid : session_state non chargé → compter les entrées Vivino avec note
+            # Itérer vc.values() évite N appels build_query sur lc["wines"]
+            n_rated   = sum(1 for v in vc.values()
+                            if v.get("rating") and not v.get("suppressed"))
             n_missing = n_total - n_rated
         cov_pct = int(100 * n_rated / max(n_total, 1))
         n_stale = sum(1 for v in vc.values() if v.get("_stale"))
@@ -3163,6 +3270,7 @@ with st.sidebar:
             unsafe_allow_html=True)
 
 
+    job = load_job_state()
 
     # FIX D : si un job tourne sur un AUTRE slug, désactiver tous les boutons
     # d'action et afficher un avertissement clair. Sans ça, l'utilisateur peut
@@ -3228,8 +3336,6 @@ with st.sidebar:
             if st.button("✖ Annuler", use_container_width=True):
                 ckpt_finish(slug); st.rerun()
 
-    job = load_job_state()
-
     # ④ CORRIGÉ : auto_live sans time.sleep() dans le thread principal.
     # L'ancien code faisait time.sleep(5) + st.rerun() à chaque cycle,
     # bloquant le serveur Streamlit pour tous les utilisateurs pendant 5s.
@@ -3247,8 +3353,7 @@ with st.sidebar:
     if job.get("status") in {"running", "queued"}:
         msg = job.get("message", "")
         age = fmt_age(job.get("updated_at", 0))
-        import re as _re
-        m_prog = _re.search(r"\[(\d+)/(\d+)\]", msg)
+        m_prog = _PROGRESS_RE.search(msg)
         if m_prog:
             done_n, total_n = int(m_prog.group(1)), int(m_prog.group(2))
             pct = done_n / max(total_n, 1)
@@ -3507,18 +3612,6 @@ else:
 st.markdown(_counter_html, unsafe_allow_html=True)
 
 # ── TRI ───────────────────────────────────────────────────────────────────
-SORTS = {
-    "Q/P 💰":  lambda x: (-(x.get("score") or 0),   -(x.get("rating") or 0)),
-    "Note ⭐":  lambda x: (-(x.get("rating") or 0),   -(x.get("score") or 0)),
-    "Prix ↑":  lambda x: ( (x.get("price") or 9999), -(x.get("score") or 0)),
-    "Prix ↓":  lambda x: (-(x.get("price") or 0),    -(x.get("score") or 0)),
-}
-_sort_help = {
-    "Q/P 💰":  "Qualité/Prix : note × popularité ÷ prix.",
-    "Note ⭐":  "Note Vivino décroissante.",
-    "Prix ↑":  "Du moins cher au plus cher.",
-    "Prix ↓":  "Du plus cher au moins cher.",
-}
 if "sort_key" not in st.session_state or st.session_state.sort_key not in SORTS:
     st.session_state.sort_key = "Q/P 💰"
 _sc1, _sc2, _sc3, _sc4 = st.columns(4)
@@ -3527,7 +3620,7 @@ for col, (label, fn) in zip([_sc1, _sc2, _sc3, _sc4], SORTS.items()):
         active = st.session_state.sort_key == label
         if st.button(label, key=f"sort_{label}",
                      type="primary" if active else "secondary",
-                     use_container_width=True, help=_sort_help.get(label,"")):
+                     use_container_width=True, help=_SORT_HELP.get(label,"")):
             st.session_state.sort_key = label
             st.rerun()
 filtered.sort(key=SORTS.get(st.session_state.sort_key, SORTS["Q/P 💰"]))
@@ -3538,9 +3631,16 @@ tab_rank, tab_deals, tab_stats, tab_data, tab_rej = st.tabs(
 
 # ── CLASSEMENT ────────────────────────────────────────────────────────────
 with tab_rank:
-    prices = [w["price"] for w in filtered if w.get("price")]
-    rated  = [w["rating"] for w in filtered if w.get("rating")]
-    best   = max(filtered, key=lambda x: x.get("score") or 0, default=None)
+    # ── Calcul stats en une seule passe sur filtered ─────────────────────
+    prices, rated, best, n_bad = [], [], None, 0
+    best_score = -1.0
+    for _w in filtered:
+        if _w.get("price"):  prices.append(_w["price"])
+        if _w.get("rating"): rated.append(_w["rating"])
+        if (_w.get("score") or 0) > best_score:
+            best_score = _w.get("score") or 0
+            best = _w
+        if _w.get("vintage_match") is False: n_bad += 1
     c1, c2, c3 = st.columns(3)
     with c1:
         if best and best.get("score"):
@@ -3565,7 +3665,6 @@ with tab_rank:
         else:
             st.metric("⭐ Meilleure note", "—")
 
-    n_bad = sum(1 for w in filtered if w.get("vintage_match") is False)
     # Alertes prix en baisse (données réelles de l'historique)
     _drops_filtered = [d for d in _price_drops if d["wine"] in filtered]
     if _drops_filtered:
@@ -3582,10 +3681,12 @@ with tab_rank:
             + (" …" if len(_drops_filtered) > 4 else ""),
             icon=None
         )
-    elif sum(1 for w in filtered if w.get("price_trend") == "↓" and w.get("available", True)):
+    elif any(True for w in filtered
+             if w.get("price_trend") == "↓" and w.get("available", True)):
         # Fallback sur price_trend si pas encore d'historique suffisant
-        n_drop = sum(1 for w in filtered if w.get("price_trend") == "↓" and w.get("available", True))
-        drop_wines = [w for w in filtered if w.get("price_trend") == "↓" and w.get("available", True)]
+        drop_wines = [w for w in filtered
+                      if w.get("price_trend") == "↓" and w.get("available", True)]
+        n_drop     = len(drop_wines)
         drop_names = ", ".join(f"**{w['name'][:35]}** ({w.get('price',0):.2f} €)" for w in drop_wines[:3])
         st.success(f"📉 **{n_drop} vin(s) en baisse de prix** : {drop_names}"
                    + (" …" if n_drop > 3 else ""), icon=None)
@@ -3823,8 +3924,10 @@ with tab_stats:
     else:
         st.markdown('<div class="tab-section">📊 Statistiques — vins filtrés</div>', unsafe_allow_html=True)
         s1, s2, s3, s4 = st.columns(4)
-        rated_w  = [w for w in filtered if w.get("rating")]
-        priced_w = [w for w in filtered if w.get("price")]
+        rated_w, priced_w = [], []
+        for _w in filtered:
+            if _w.get("rating"): rated_w.append(_w)
+            if _w.get("price"):  priced_w.append(_w)
         s1.metric("Vins analysés", len(filtered))
         s2.metric("Notés Vivino",  f"{len(rated_w)}/{len(filtered)}")
         s3.metric("Prix médian",   f"{sorted(w['price'] for w in priced_w)[len(priced_w)//2]:.2f} €" if priced_w else "—")
@@ -4063,7 +4166,7 @@ with tab_data:
             st.success("Entrée déverrouillée. Les prochains refresh Vivino pourront la recalculer.")
             st.rerun()
 
-    ph = load_price_history()
+    ph = _ph_for_alerts  # déjà chargé dans la zone alerte-prix ci-dessus — évite un 2e I/O
     if ph:
         st.divider()
         st.markdown('<div class="tab-section">📈 Historique des prix</div>', unsafe_allow_html=True)
