@@ -388,24 +388,32 @@ footer{display:none !important}
   background:rgba(107,26,42,.05) !important;
   border-bottom:2.5px solid var(--bx) !important}
 
-/* ═══════════════ BOUTON 🚫 ═══════════════ */
-div[data-testid="column"]:has(button[title*="Vivino incorrect"]){
-  display:flex !important;flex-direction:column !important;
-  justify-content:flex-end !important;padding-bottom:.82rem !important;
-  margin-left:-3.8rem !important;z-index:10 !important;
+/* ═══════════════ BOUTON 🚫 ═══════════════
+   Principe : la colonne bouton est positionnée absolument au bas-droit
+   de la carte (sur la zone score-wrap) ; la colonne carte prend 100%.
+   ═══════════════════════════════════════ */
+/* Bloc parent : contexte de positionnement */
+div[data-testid="stHorizontalBlock"]:has(button[title*="Vivino incorrect"]){
   position:relative !important}
+/* Colonne carte : prend toute la largeur disponible */
+div[data-testid="stHorizontalBlock"]:has(button[title*="Vivino incorrect"])
+> div[data-testid="column"]:not(:has(button[title*="Vivino incorrect"])){
+  flex:1 1 100% !important;max-width:100% !important}
+/* Colonne bouton : absolute, ancrée en bas-droit de la carte */
+div[data-testid="column"]:has(button[title*="Vivino incorrect"]){
+  position:absolute !important;bottom:.52rem !important;right:.55rem !important;
+  width:auto !important;padding:0 !important;z-index:10 !important}
+/* Style bouton : discret, carré, accordé avec score-wrap */
 div[data-testid="column"] button[title*="Vivino incorrect"]{
-  font-size:.59rem !important;padding:2px 7px !important;
-  min-height:0 !important;height:auto !important;line-height:1.5 !important;
-  background:transparent !important;
-  border:1px solid rgba(220,38,38,.2) !important;
-  border-radius:20px !important;color:rgba(220,38,38,.38) !important;
-  font-family:'DM Mono',monospace !important;width:auto !important;
-  white-space:nowrap !important;
+  font-size:.72rem !important;padding:3px 6px !important;
+  min-height:0 !important;height:24px !important;width:26px !important;
+  line-height:1 !important;background:transparent !important;
+  border:1px solid rgba(220,38,38,.18) !important;
+  border-radius:5px !important;color:rgba(220,38,38,.32) !important;
   transition:color .15s,border-color .15s,background .15s !important}
 div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
-  color:#dc2626 !important;border-color:rgba(220,38,38,.5) !important;
-  background:rgba(220,38,38,.05) !important}
+  color:#dc2626 !important;border-color:rgba(220,38,38,.55) !important;
+  background:rgba(220,38,38,.06) !important}
 
 /* ═══════════════ PAGINATION ═══════════════ */
 .page-info{
@@ -580,7 +588,7 @@ div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
     background:rgba(253,164,175,.05) !important}
   div[data-testid="column"] button[title*="Vivino incorrect"]{
     border-color:rgba(253,164,175,.18) !important;
-    color:rgba(253,164,175,.35) !important}
+    color:rgba(253,164,175,.28) !important}
   div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
     color:#fda4af !important;border-color:rgba(253,164,175,.48) !important;
     background:rgba(253,164,175,.06) !important}
@@ -1137,11 +1145,13 @@ def _background_job(slug: str, mode: str) -> None:
 
     def _log(msg: str):
         _set_job_state(message=msg)
-        # Appender chaque ligne dans le fichier log → console temps réel
+        # Écrire chaque sous-ligne séparément → évite le \n littéral dans la console.
+        # Certains messages contiennent des \n embarqués (ex. résumé multi-lignes).
         try:
             ts = time.strftime("%H:%M:%S")
             with JOB_LOG_PATH.open("a", encoding="utf-8") as f:
-                f.write(f"[{ts}] {msg}\n")
+                for sub in msg.splitlines():
+                    f.write(f"[{ts}] {sub}\n")
         except Exception:
             pass
 
@@ -2965,8 +2975,6 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
         links.append(f'<a href="{safe_url}" target="_blank" class="lnk lnk-lec">🛒 Leclerc</a>')
     if safe_viv:
         links.append(f'<a href="{safe_viv}" target="_blank" class="lnk lnk-viv">🍷 Vivino</a>')
-    # 🚫 placeholder visuel dans les liens — le vrai bouton Streamlit est dans _c_btn
-    # (aligné en bas par CSS pour coïncider visuellement avec cette ligne)
     links_html = (f'<div class="wine-links">' + "".join(links) + conf_html + "</div>") if links or conf_html else ""
 
     score  = wine.get("score") or 0
@@ -3115,7 +3123,9 @@ def _fmt_log_line(line: str) -> str:
         color = "#c9d1d9"  # blanc cassé (défaut)
     ts_html   = f'<span style="color:#484f58">{ts}</span>' if ts else ""
     rest_html = f'<span style="color:{color}">{rest_esc}</span>'
-    return ts_html + rest_html
+    # Chaque ligne enveloppée dans un <div> : évite que st.markdown() collapse
+    # le \n séparateur en texte littéral ou en espace entre deux <span> inline.
+    return f'<div style="margin:0;min-height:1.5em">{ts_html}{rest_html}</div>'
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3218,7 +3228,19 @@ with st.sidebar:
         unsafe_allow_html=True)
 
     st.markdown('<div class="sb-section">🍾 Type de vin</div>', unsafe_allow_html=True)
-    wine_label = st.selectbox("Type", list(WINE_TYPES), label_visibility="collapsed")
+    # key= explicite : évite que Streamlit perde la sélection lors des st.rerun()
+    # index= : restaure la sélection depuis loaded_slug si la clé widget est perdue
+    _wine_labels = list(WINE_TYPES.keys())
+    _loaded_lbl  = next(
+        (k for k, v in WINE_TYPES.items() if v == st.session_state.get("loaded_slug")),
+        _wine_labels[0]
+    )
+    wine_label = st.selectbox(
+        "Type", _wine_labels,
+        index=_wine_labels.index(_loaded_lbl),
+        key="wine_type_selector",
+        label_visibility="collapsed",
+    )
     slug       = WINE_TYPES[wine_label]
 
     st.markdown('<div class="sb-section">🔄 Mise à jour</div>', unsafe_allow_html=True)
@@ -3558,6 +3580,11 @@ if job.get("status") == "done" and job.get("slug") == slug:
     _update_wines_from_cache()
 
 wines = st.session_state.wines
+# Guard : si les données en session sont d'un autre slug (ex. rouge chargé
+# pendant que l'utilisateur bascule sur blanc), recharger immédiatement.
+if wines and st.session_state.get("loaded_slug") != slug:
+    _update_wines_from_cache()
+    wines = st.session_state.wines
 grapes_filter = grapes_filter if 'grapes_filter' in dir() else []
 if not wines:
     st.markdown(
@@ -3722,7 +3749,7 @@ with tab_rank:
             _reject_key = f"reject_mode_{_uid}"
 
             if _has_viv:
-                # Colonne carte + colonne 🚫 (alignée en bas via CSS global)
+                # Colonne carte (100% largeur) + colonne 🚫 (positionnée en abs bas-droit par CSS)
                 _c_card, _c_btn = st.columns([1, 0.08])
                 with _c_card:
                     st.markdown(wine_card_html(w, start + i + 1, max_score),
@@ -4321,7 +4348,7 @@ if _console_visible:
         'font-size:.72rem;line-height:1.5;padding:.75rem 1rem;'
         'border-radius:6px;border:1px solid #30363d;'
         'height:360px;overflow-y:auto;white-space:pre-wrap;word-break:break-all">'
-        + "\n".join(
+        + "".join(
             _fmt_log_line(l)
             for l in (_log_display.splitlines() if _log_display else ["(aucun log)"])
         )
