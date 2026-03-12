@@ -389,24 +389,24 @@ footer{display:none !important}
   border-bottom:2.5px solid var(--bx) !important}
 
 /* ═══════════════ BOUTON 🚫 ═══════════════
-   Technique : margin-left négatif pour chevaucher le score-wrap,
-   align-self:flex-end pour coller en bas.
-   Pas de position:absolute ni de :has() sur le parent.
+   Géométrie carte : grid 2.2rem 1fr 5.8rem 5.4rem 7rem, gap .7rem, padding .85rem 1.1rem
+   → score-wrap = 7rem depuis le bord droit de la carte (+ 1.1rem padding-right)
+   → décalage = 7rem + 1.1rem + ~0.7rem gap Streamlit = 8.8rem
    ═══════════════════════════════════════ */
 div[data-testid="column"]:has(button[title*="Vivino incorrect"]){
-  flex:0 0 32px !important;width:32px !important;max-width:32px !important;
-  min-width:32px !important;padding:0 !important;
-  margin-left:-38px !important;align-self:flex-end !important;
-  padding-bottom:.55rem !important;z-index:10 !important;
-  position:relative !important}
+  width:7rem !important;min-width:7rem !important;
+  max-width:7rem !important;flex:0 0 7rem !important;
+  margin-left:-8.8rem !important;padding:0 !important;
+  align-self:flex-end !important;padding-bottom:.85rem !important;
+  z-index:10 !important;display:flex !important;
+  justify-content:center !important}
 div[data-testid="column"] button[title*="Vivino incorrect"]{
-  font-size:.8rem !important;padding:0 !important;
+  font-size:.82rem !important;padding:0 !important;
   min-height:0 !important;height:26px !important;width:28px !important;
-  line-height:26px !important;background:transparent !important;
+  line-height:1 !important;background:transparent !important;
   border:1px solid rgba(220,38,38,.22) !important;
   border-radius:5px !important;color:rgba(220,38,38,.35) !important;
-  transition:color .15s,border-color .15s,background .15s !important;
-  display:flex !important;align-items:center !important;justify-content:center !important}
+  transition:color .15s,border-color .15s,background .15s !important}
 div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
   color:#dc2626 !important;border-color:rgba(220,38,38,.6) !important;
   background:rgba(220,38,38,.07) !important}
@@ -3745,8 +3745,8 @@ with tab_rank:
             _reject_key = f"reject_mode_{_uid}"
 
             if _has_viv:
-                # Colonne carte (100% largeur) + colonne 🚫 (positionnée en abs bas-droit par CSS)
-                _c_card, _c_btn = st.columns([1, 0.08])
+                # Colonne carte (quasi 100%) + colonne 🚫 (width minuscule, repositionnée par CSS)
+                _c_card, _c_btn = st.columns([1, 0.001])
                 with _c_card:
                     st.markdown(wine_card_html(w, start + i + 1, max_score),
                                 unsafe_allow_html=True)
