@@ -388,28 +388,17 @@ footer{display:none !important}
   background:rgba(107,26,42,.05) !important;
   border-bottom:2.5px solid var(--bx) !important}
 
-/* ═══════════════ BOUTON 🚫 ═══════════════
-   Géométrie carte : grid 2.2rem 1fr 5.8rem 5.4rem 7rem, gap .7rem, padding .85rem 1.1rem
-   → score-wrap = 7rem depuis le bord droit de la carte (+ 1.1rem padding-right)
-   → décalage = 7rem + 1.1rem + ~0.7rem gap Streamlit = 8.8rem
-   ═══════════════════════════════════════ */
-div[data-testid="column"]:has(button[title*="Vivino incorrect"]){
-  width:7rem !important;min-width:7rem !important;
-  max-width:7rem !important;flex:0 0 7rem !important;
-  margin-left:-8.8rem !important;padding:0 !important;
-  align-self:flex-end !important;padding-bottom:.85rem !important;
-  z-index:10 !important;display:flex !important;
-  justify-content:center !important}
-div[data-testid="column"] button[title*="Vivino incorrect"]{
-  font-size:.82rem !important;padding:0 !important;
-  min-height:0 !important;height:26px !important;width:28px !important;
-  line-height:1 !important;background:transparent !important;
-  border:1px solid rgba(220,38,38,.22) !important;
-  border-radius:5px !important;color:rgba(220,38,38,.35) !important;
-  transition:color .15s,border-color .15s,background .15s !important}
-div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
-  color:#dc2626 !important;border-color:rgba(220,38,38,.6) !important;
-  background:rgba(220,38,38,.07) !important}
+/* ═══════════════ BOUTON 🚫 (inline dans .score-wrap) ═══════════════ */
+.btn-rej{
+  display:block;margin-top:6px;text-align:center;
+  font-size:.78rem;line-height:1;text-decoration:none;
+  padding:3px 0;border:1px solid rgba(220,38,38,.2);
+  border-radius:5px;color:rgba(220,38,38,.32);
+  transition:color .15s,border-color .15s,background .15s;
+  cursor:pointer}
+.btn-rej:hover{
+  color:#dc2626;border-color:rgba(220,38,38,.55);
+  background:rgba(220,38,38,.07)}
 
 /* ═══════════════ PAGINATION ═══════════════ */
 .page-info{
@@ -582,12 +571,9 @@ div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
   [data-testid="stTabs"] [aria-selected="true"]{
     color:#fda4af !important;border-bottom-color:#fda4af !important;
     background:rgba(253,164,175,.05) !important}
-  div[data-testid="column"] button[title*="Vivino incorrect"]{
-    border-color:rgba(253,164,175,.2) !important;
-    color:rgba(253,164,175,.3) !important}
-  div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
-    color:#fda4af !important;border-color:rgba(253,164,175,.55) !important;
-    background:rgba(253,164,175,.07) !important}
+  .btn-rej{border-color:rgba(253,164,175,.2);color:rgba(253,164,175,.3)}
+  .btn-rej:hover{color:#fda4af;border-color:rgba(253,164,175,.55);
+    background:rgba(253,164,175,.07)}
   /* Altair : fond transparent déjà géré via CSS, textes adaptés */
   .vega-embed .mark-text text{fill:#EDD5DA !important}
   /* Deals banner */
@@ -2924,7 +2910,8 @@ def fmt_count(n) -> str:
     return f"{n:,}".replace(",", "\u202f")
 
 
-def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
+def wine_card_html(wine: dict, rank: int, max_score: float,
+                   reject_ean: str | None = None) -> str:
     cls  = _RANK_CLS.get(rank, "")
     if wine.get("vintage_match") is False: cls = (cls + " vintage-warn").strip()
     if not wine.get("available", True):    cls = (cls + " unavailable").strip()
@@ -3013,13 +3000,20 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
                  f'{price_s}{trend_html}</div>')
 
     pct = min(100, (score / max_score) * 100) if max_score > 0 else 0
+    _rej_link = (
+        f'<a href="?rej={_html.escape(reject_ean)}" class="btn-rej" title="Vivino incorrect">🚫</a>'
+    ) if reject_ean else ""
     score_col = (
         f'<div class="score-wrap">'
         f'<div class="score-num">{score:.2f}</div>'
         f'<div class="score-lbl">score Q/P</div>'
         f'<div class="score-bar"><div class="score-fill" style="width:{pct:.1f}%"></div></div>'
+        f'{_rej_link}'
         f'</div>'
-    ) if score else '<div class="score-wrap" style="color:var(--muted);font-size:.72rem;text-align:center">—</div>'
+    ) if score else (
+        f'<div class="score-wrap" style="color:var(--muted);font-size:.72rem;text-align:center">'
+        f'—{_rej_link}</div>'
+    )
 
     # Nom + millésime + indispo sur une ligne, badges en dessous
     name_line = (f'<div class="wine-name">{name_html}'
@@ -3608,6 +3602,22 @@ if _price_drops:
             icon="📉"
         )
 
+# ── GESTION QUERY PARAM ?rej= ─────────────────────────────────────────────
+# Quand l'utilisateur clique 🚫 dans une carte, href="?rej=EAN" provoque un
+# rerun. On intercepte le param ici pour ouvrir le formulaire de rejet.
+_rej_ean = st.query_params.get("rej")
+if _rej_ean:
+    # Trouver le vin correspondant et armer le formulaire
+    for _w_tmp in wines:
+        _k_tmp = _w_tmp.get("ean") or build_query(_w_tmp["name"])
+        if _k_tmp == _rej_ean:
+            _idx_tmp = wines.index(_w_tmp)
+            _uid_tmp = f"{slug}_{_w_tmp.get('ean') or _idx_tmp}_0"
+            st.session_state[f"reject_mode_{_uid_tmp}"] = True
+            break
+    st.query_params.clear()
+    st.rerun()
+
 # ── FILTRE ────────────────────────────────────────────────────────────────
 filtered = [w for w in wines
     if price_range[0] <= (w.get("price") or 0) <= price_range[1]
@@ -3743,80 +3753,68 @@ with tab_rank:
             _uid = f"{slug}_{w.get('ean') or i}_{page}"
             _has_viv = bool(w.get("vivino_url"))
             _reject_key = f"reject_mode_{_uid}"
+            # EAN utilisé comme identifiant dans le query param ?rej=
+            _ean_key = w.get("ean") or build_query(w["name"])
 
-            if _has_viv:
-                # Colonne carte (quasi 100%) + colonne 🚫 (width minuscule, repositionnée par CSS)
-                _c_card, _c_btn = st.columns([1, 0.001])
-                with _c_card:
-                    st.markdown(wine_card_html(w, start + i + 1, max_score),
-                                unsafe_allow_html=True)
-                with _c_btn:
-                    # help="Vivino incorrect …" → sélecteur CSS [title*="Vivino incorrect"]
-                    if st.button("🚫", key=f"bad_viv_{_uid}",
-                                 help=f"Vivino incorrect — {w['name'][:40]}"):
-                        st.session_state[_reject_key] = True
-                        st.rerun()
+            # Carte : le bouton 🚫 est un <a href="?rej=EAN"> dans le HTML de la carte
+            st.markdown(
+                wine_card_html(w, start + i + 1, max_score,
+                               reject_ean=_ean_key if _has_viv else None),
+                unsafe_allow_html=True)
 
-                # Formulaire de raison — s'affiche sous la carte si bouton cliqué
-                if st.session_state.get(_reject_key):
-                    with st.container():
-                        st.markdown(
-                            f'<div style="background:#fff5f5;border:1px solid #fca5a5;'
-                            f'border-radius:8px;padding:.6rem .8rem;margin-bottom:.45rem;'
-                            f'font-size:.8rem;color:#7f1d1d">'
-                            f'<strong>🚫 Pourquoi ce lien Vivino est incorrect ?</strong><br>'
-                            f'<em>{w.get("vivino_url","")[:60]}…</em></div>',
-                            unsafe_allow_html=True)
-                        _r_cols = st.columns([3, 1, 1])
-                        with _r_cols[0]:
-                            _reason = st.selectbox(
-                                "Raison",
-                                list(REJECTION_REASONS.keys()),
-                                format_func=lambda k: REJECTION_REASONS[k],
-                                key=f"reason_{_uid}",
-                                label_visibility="collapsed")
-                        with _r_cols[1]:
-                            if st.button("✅ Confirmer", key=f"confirm_rej_{_uid}",
-                                         use_container_width=True, type="primary"):
-                                _vc_live = load_vivino_cache(slug)
-                                _q = build_query(w["name"])
-                                # Récupérer le titre Vivino depuis le cache avant suppression
-                                _old = _vc_live.get(_q, {})
-                                _old_title = _old.get("vivino_name") or _old.get("vivino_url", "")
-                                # Enregistrer le rejet avec raison
-                                save_vivino_rejection(
-                                    wine_name=w["name"],
-                                    query=_q,
-                                    rejected_url=w.get("vivino_url", ""),
-                                    rejected_title=_old_title,
-                                    reason=_reason,
-                                )
-                                # Marquer supprimé dans le cache Vivino
-                                _vc_live[_q] = {
-                                    "rating": None, "ratings_count": 0,
-                                    "vivino_url": "", "vivino_year": None,
-                                    "vintage_match": None, "match_confidence": None,
-                                    "manual_override": True, "suppressed": True,
-                                    "locked": True, "cached_at": time.time(),
-                                }
-                                save_vivino_cache(_vc_live, slug)
-                                # Recharger session_state.wines pour refléter le rejet
-                                # immédiatement (sans attendre btn_stock)
-                                _wines_fresh = load_wines_from_cache(slug)
-                                if _wines_fresh:
-                                    st.session_state.wines = _wines_fresh
-                                st.session_state.pop(_reject_key, None)
-                                _rlab = REJECTION_REASONS[_reason]
-                                st.toast(f"✅ Rejet enregistré · {_rlab}", icon="🚫")
-                                st.rerun()
-                        with _r_cols[2]:
-                            if st.button("Annuler", key=f"cancel_rej_{_uid}",
-                                         use_container_width=True):
-                                st.session_state.pop(_reject_key, None)
-                                st.rerun()
-            else:
-                st.markdown(wine_card_html(w, start + i + 1, max_score),
-                            unsafe_allow_html=True)
+            # Formulaire de raison — s'affiche si ce vin a été sélectionné pour rejet
+            if st.session_state.get(_reject_key):
+                with st.container():
+                    st.markdown(
+                        f'<div style="background:#fff5f5;border:1px solid #fca5a5;'
+                        f'border-radius:8px;padding:.6rem .8rem;margin-bottom:.45rem;'
+                        f'font-size:.8rem;color:#7f1d1d">'
+                        f'<strong>🚫 Pourquoi ce lien Vivino est incorrect ?</strong><br>'
+                        f'<em>{w.get("vivino_url","")[:60]}…</em></div>',
+                        unsafe_allow_html=True)
+                    _r_cols = st.columns([3, 1, 1])
+                    with _r_cols[0]:
+                        _reason = st.selectbox(
+                            "Raison",
+                            list(REJECTION_REASONS.keys()),
+                            format_func=lambda k: REJECTION_REASONS[k],
+                            key=f"reason_{_uid}",
+                            label_visibility="collapsed")
+                    with _r_cols[1]:
+                        if st.button("✅ Confirmer", key=f"confirm_rej_{_uid}",
+                                     use_container_width=True, type="primary"):
+                            _vc_live = load_vivino_cache(slug)
+                            _q = build_query(w["name"])
+                            _old = _vc_live.get(_q, {})
+                            _old_title = _old.get("vivino_name") or _old.get("vivino_url", "")
+                            save_vivino_rejection(
+                                wine_name=w["name"],
+                                query=_q,
+                                rejected_url=w.get("vivino_url", ""),
+                                rejected_title=_old_title,
+                                reason=_reason,
+                            )
+                            _vc_live[_q] = {
+                                "rating": None, "ratings_count": 0,
+                                "vivino_url": "", "vivino_year": None,
+                                "vintage_match": None, "match_confidence": None,
+                                "manual_override": True, "suppressed": True,
+                                "locked": True, "cached_at": time.time(),
+                            }
+                            save_vivino_cache(_vc_live, slug)
+                            _wines_fresh = load_wines_from_cache(slug)
+                            if _wines_fresh:
+                                st.session_state.wines = _wines_fresh
+                            st.session_state.pop(_reject_key, None)
+                            _rlab = REJECTION_REASONS[_reason]
+                            st.toast(f"✅ Rejet enregistré · {_rlab}", icon="🚫")
+                            st.rerun()
+                    with _r_cols[2]:
+                        if st.button("Annuler", key=f"cancel_rej_{_uid}",
+                                     use_container_width=True):
+                            st.session_state.pop(_reject_key, None)
+                            st.rerun()
+
 
         # Contrôles de pagination
         if n_pages > 1:
