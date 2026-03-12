@@ -3021,7 +3021,9 @@ def wine_card_html(wine: dict, rank: int, max_score: float,
 
     pct = min(100, (score / max_score) * 100) if max_score > 0 else 0
     _rej_link = (
-        f'<a href="?rej={_html.escape(reject_ean)}" class="btn-rej" title="Vivino incorrect — signaler">🚫</a>'
+        f'<a class="btn-rej" title="Vivino incorrect — signaler"'
+        f' onclick="window.location.search=\'?rej={_html.escape(reject_ean)}\'"'
+        f' style="cursor:pointer">🚫</a>'
     ) if reject_ean else ""
     score_col = (
         f'<div class="score-wrap">'
