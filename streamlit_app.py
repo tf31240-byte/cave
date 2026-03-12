@@ -235,73 +235,81 @@ footer{display:none !important}
 /* ═══════════════ CARTE VIN ═══════════════ */
 .wine-card{
   background:var(--card);border-radius:var(--r);
-  padding:.85rem 1.1rem;margin-bottom:.4rem;
-  border-left:4px solid var(--bx);box-shadow:var(--sh);
+  padding:.9rem 1.1rem .9rem 1rem;margin-bottom:.35rem;
+  border-left:3px solid var(--bx);box-shadow:var(--sh);
   display:grid;
-  grid-template-columns:2.2rem 1fr 5.8rem 5.4rem 7rem;
-  align-items:center;gap:.7rem;
-  transition:box-shadow .2s,transform .2s}
-.wine-card:hover{box-shadow:var(--sh-hover);transform:translateY(-2px)}
+  grid-template-columns:2.4rem 1fr 6rem 5.2rem 7.2rem;
+  align-items:center;gap:.8rem;
+  transition:box-shadow .18s,transform .18s,border-left-color .18s;
+  position:relative}
+.wine-card:hover{
+  box-shadow:var(--sh-hover);transform:translateY(-1px);
+  border-left-color:var(--bx-light)}
 
 /* Podium */
 .wine-card.top1{
-  border-left:5px solid var(--gold);
-  background:linear-gradient(108deg,#FFF9EC 0%,var(--card) 50%);
-  box-shadow:0 2px 12px rgba(201,168,76,.14),0 6px 24px rgba(201,168,76,.07)}
+  border-left:4px solid var(--gold);
+  background:linear-gradient(108deg,#FFFBF0 0%,var(--card) 55%);
+  box-shadow:0 2px 12px rgba(201,168,76,.12),0 6px 24px rgba(201,168,76,.06)}
 .wine-card.top2{
-  border-left:5px solid #B4B4B4;
-  background:linear-gradient(108deg,#F5F5F7 0%,var(--card) 50%)}
+  border-left:4px solid #B4B4B4;
+  background:linear-gradient(108deg,#F5F5F7 0%,var(--card) 55%)}
 .wine-card.top3{
-  border-left:5px solid #C47540;
-  background:linear-gradient(108deg,#FCF1E9 0%,var(--card) 50%)}
-.wine-card.vintage-warn{border-right:3px solid #f59e0b}
-.wine-card.unavailable{opacity:.3;filter:grayscale(60%)}
+  border-left:4px solid #C47540;
+  background:linear-gradient(108deg,#FCF1E9 0%,var(--card) 55%)}
+.wine-card.vintage-warn{box-shadow:var(--sh),inset 0 0 0 1px rgba(245,158,11,.3)}
+.wine-card.unavailable{opacity:.28;filter:grayscale(55%)}
 .wine-card.stale{border-left-style:dashed}
 
+/* ── Rang ── */
 .wine-rank{
-  font-family:'DM Mono',monospace;font-size:1.2rem;
-  text-align:center;line-height:1;flex-shrink:0}
+  font-family:'DM Mono',monospace;font-size:1.1rem;
+  text-align:center;line-height:1;flex-shrink:0;
+  color:var(--muted)}
 
+/* ── Info (col 2) ── */
 .wine-info{min-width:0;position:relative}
 .wine-bottle{
   position:absolute;right:0;top:50%;transform:translateY(-50%);
-  width:34px;height:52px;object-fit:contain;
-  border-radius:3px;opacity:.85;pointer-events:none}
-.wine-info.has-img{padding-right:44px}
+  width:32px;height:50px;object-fit:contain;
+  border-radius:3px;opacity:.8;pointer-events:none}
+.wine-info.has-img{padding-right:42px}
 .wine-name{
-  font-weight:600;font-size:.87rem;color:var(--ink);
+  font-weight:600;font-size:.875rem;color:var(--ink);
   display:-webkit-box;-webkit-line-clamp:2;
-  -webkit-box-orient:vertical;overflow:hidden;line-height:1.42}
-.wine-name a{color:inherit;text-decoration:none;transition:color .15s}
+  -webkit-box-orient:vertical;overflow:hidden;line-height:1.44}
+.wine-name a{color:inherit;text-decoration:none;transition:color .12s}
 .wine-name a:hover{color:var(--bx)}
 .wine-year{
-  color:var(--muted);font-size:.65rem;font-weight:400;
-  margin-left:.3rem;font-style:italic;white-space:nowrap}
-.wine-unavail{font-size:.6rem;color:#dc2626;margin-left:.3rem;white-space:nowrap}
-.wine-sub{font-size:.67rem;color:var(--muted);margin-top:.1rem}
+  color:var(--muted);font-size:.62rem;font-weight:400;
+  margin-left:.28rem;font-style:italic;white-space:nowrap}
+.wine-unavail{font-size:.58rem;color:#dc2626;margin-left:.28rem;white-space:nowrap}
+.wine-sub{font-size:.65rem;color:var(--muted);margin-top:.12rem}
 
+/* Pills de liens */
 .wine-links{
-  display:flex;gap:.25rem;margin-top:.3rem;flex-wrap:wrap;align-items:center}
+  display:flex;gap:.22rem;margin-top:.32rem;flex-wrap:wrap;align-items:center}
 .lnk{
-  font-size:.59rem;text-decoration:none;border-radius:20px;
-  padding:2px 7px;border:1px solid;white-space:nowrap;
+  font-size:.57rem;text-decoration:none;border-radius:20px;
+  padding:2px 8px;border:1px solid;white-space:nowrap;
   font-family:'DM Mono';font-weight:500;
   transition:background .12s,color .12s,border-color .12s}
-.lnk-lec{color:#1d4ed8;border-color:rgba(29,78,216,.28)}
-.lnk-lec:hover{background:rgba(29,78,216,.07)}
-.lnk-viv{color:#6b21a8;border-color:rgba(107,33,168,.28)}
-.lnk-viv:hover{background:rgba(107,33,168,.07)}
+.lnk-lec{color:#1d4ed8;border-color:rgba(29,78,216,.25)}
+.lnk-lec:hover{background:rgba(29,78,216,.06);border-color:rgba(29,78,216,.4)}
+.lnk-viv{color:#6b21a8;border-color:rgba(107,33,168,.25)}
+.lnk-viv:hover{background:rgba(107,33,168,.06);border-color:rgba(107,33,168,.4)}
 
+/* Barre confiance */
 .conf-bar{
-  height:3px;border-radius:2px;margin-top:4px;
+  height:2px;border-radius:2px;margin-top:5px;
   background:var(--border);overflow:hidden}
 .conf-fill{height:100%;border-radius:2px}
 
-/* Badges — pills */
+/* Badges */
 .badge{
-  display:inline-block;padding:.1rem .5rem;border-radius:20px;
-  font-size:.57rem;font-family:'DM Mono';font-weight:500;
-  margin-right:.1rem;margin-top:.2rem;letter-spacing:.02em;
+  display:inline-block;padding:.08rem .45rem;border-radius:20px;
+  font-size:.55rem;font-family:'DM Mono';font-weight:500;
+  margin-right:.1rem;margin-top:.18rem;letter-spacing:.02em;
   vertical-align:middle;border:1px solid}
 .b-deal {background:rgba(201,168,76,.10);color:#7a5520;border-color:rgba(201,168,76,.28)}
 .b-top  {background:rgba(107,26,42,.07);color:#6B1A2A;border-color:rgba(107,26,42,.14)}
@@ -312,38 +320,47 @@ footer{display:none !important}
 .b-style{background:rgba(8,145,178,.05);color:#0e7490;border-color:rgba(8,145,178,.15)}
 .b-vol  {background:rgba(180,83,9,.06);color:#92400e;border-color:rgba(180,83,9,.15)}
 
+/* ── Note (col 3) ── */
 .wine-rating{text-align:center}
-.stars{color:var(--gold);font-size:.8rem;letter-spacing:.3px;display:block;line-height:1.2}
+.stars{
+  color:var(--gold);font-size:.76rem;letter-spacing:.2px;
+  display:block;line-height:1.2}
 .r-num{
-  font-family:'DM Mono';font-size:1.02rem;font-weight:700;
+  font-family:'DM Mono';font-size:1.05rem;font-weight:700;
   color:var(--ink);font-feature-settings:"tnum";
-  display:block;margin-top:.06rem;line-height:1}
+  display:block;margin-top:.05rem;line-height:1}
 .r-cnt{
-  font-size:.55rem;color:var(--muted);display:block;
-  margin-top:.05rem;font-feature-settings:"tnum"}
-.no-rat{font-size:.62rem;color:#bbb;font-style:italic;text-align:center}
+  font-size:.52rem;color:var(--muted);display:block;
+  margin-top:.06rem;font-feature-settings:"tnum"}
+.no-rat{
+  font-size:.6rem;color:var(--muted);font-style:italic;
+  text-align:center;opacity:.6}
 
+/* ── Prix (col 4) ── */
 .wine-price{
-  font-family:'DM Mono',monospace;font-size:1.08rem;
+  font-family:'DM Mono',monospace;font-size:1.05rem;
   font-weight:700;color:var(--ink);text-align:right;
   white-space:nowrap;font-feature-settings:"tnum"}
-.p-up  {color:#dc2626;font-size:.64rem;font-weight:700;margin-left:2px;vertical-align:middle}
-.p-down{color:#16a34a;font-size:.64rem;font-weight:700;margin-left:2px;vertical-align:middle}
-.p-eq  {color:#9ca3af;font-size:.64rem;margin-left:2px;vertical-align:middle}
+.p-up  {color:#dc2626;font-size:.6rem;font-weight:700;margin-left:2px;vertical-align:middle}
+.p-down{color:#16a34a;font-size:.6rem;font-weight:700;margin-left:2px;vertical-align:middle}
+.p-eq  {color:#9ca3af;font-size:.6rem;margin-left:2px;vertical-align:middle}
 
-.score-wrap{text-align:right}
+/* ── Score Q/P (col 5) + btn-rej ── */
+.score-wrap{
+  text-align:right;position:relative;
+  padding-bottom:1.6rem}  /* espace réservé pour btn-rej */
 .score-num{
-  font-family:'DM Mono';font-size:.98rem;color:var(--bx);
+  font-family:'DM Mono';font-size:1rem;color:var(--bx);
   font-weight:700;font-feature-settings:"tnum";line-height:1}
 .score-lbl{
-  font-size:.5rem;color:var(--muted);letter-spacing:.07em;
-  text-transform:uppercase;margin-top:.04rem}
+  font-size:.46rem;color:var(--muted);letter-spacing:.08em;
+  text-transform:uppercase;margin-top:.05rem}
 .score-bar{
-  background:rgba(107,26,42,.08);border-radius:99px;
-  height:6px;overflow:hidden;margin-top:6px}
+  background:rgba(107,26,42,.07);border-radius:99px;
+  height:4px;overflow:hidden;margin-top:7px}
 .score-fill{
   height:100%;border-radius:99px;
-  background:linear-gradient(90deg,var(--bx) 0%,#9C3050 45%,var(--gold) 100%)}
+  background:linear-gradient(90deg,var(--bx) 0%,#9C3050 50%,var(--gold) 100%)}
 
 /* ═══════════════ DEALS ═══════════════ */
 .deal-card{
@@ -388,17 +405,20 @@ footer{display:none !important}
   background:rgba(107,26,42,.05) !important;
   border-bottom:2.5px solid var(--bx) !important}
 
-/* ═══════════════ BOUTON 🚫 (inline dans .score-wrap) ═══════════════ */
+/* ═══════════════ BOUTON 🚫 (dans .score-wrap en position absolue) ═══════════════ */
 .btn-rej{
-  display:block;margin-top:6px;text-align:center;
-  font-size:.78rem;line-height:1;text-decoration:none;
-  padding:3px 0;border:1px solid rgba(220,38,38,.2);
-  border-radius:5px;color:rgba(220,38,38,.32);
-  transition:color .15s,border-color .15s,background .15s;
-  cursor:pointer}
+  position:absolute;bottom:0;right:0;
+  width:24px;height:22px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:.72rem;line-height:1;text-decoration:none;
+  border:1px solid rgba(220,38,38,.2);border-radius:6px;
+  color:rgba(220,38,38,.3);background:transparent;
+  opacity:0;transform:scale(.88);
+  transition:opacity .18s,transform .18s,color .15s,border-color .15s,background .15s}
+.wine-card:hover .btn-rej{opacity:1;transform:scale(1)}
 .btn-rej:hover{
-  color:#dc2626;border-color:rgba(220,38,38,.55);
-  background:rgba(220,38,38,.07)}
+  color:#dc2626;border-color:rgba(220,38,38,.65);
+  background:rgba(220,38,38,.08);transform:scale(1.08)}
 
 /* ═══════════════ PAGINATION ═══════════════ */
 .page-info{
@@ -539,16 +559,17 @@ footer{display:none !important}
   [data-testid="stMetricLabel"]{color:var(--muted) !important}
   [data-testid="stMetricValue"]{color:var(--ink) !important}
   .wine-card{border-left-color:#5A2535}
+  .wine-card:hover{border-left-color:#7A3550}
   .wine-card.top1{
-    background:linear-gradient(108deg,#2C1A02,#1C1015);
+    background:linear-gradient(108deg,#2A1800,#1C1015);
     border-left-color:var(--gold)}
   .wine-card.top2{
-    background:linear-gradient(108deg,#1B1B26,#1C1015);
+    background:linear-gradient(108deg,#181828,#1C1015);
     border-left-color:#909090}
   .wine-card.top3{
-    background:linear-gradient(108deg,#201402,#1C1015);
+    background:linear-gradient(108deg,#1E1100,#1C1015);
     border-left-color:#B06035}
-  .wine-card.unavailable{opacity:.28}
+  .wine-card.unavailable{opacity:.22}
   .wine-name a{color:var(--ink) !important}
   .wine-sub{color:var(--muted)}
   .badge.b-reg  {background:#1A1438;color:#c4b5fd;border-color:rgba(196,181,253,.2)}
@@ -557,12 +578,12 @@ footer{display:none !important}
   .badge.b-nat  {background:#0E2014;color:#86efac;border-color:rgba(134,239,172,.18)}
   .badge.b-grape{background:#160A2C;color:#c4b5fd;border-color:rgba(196,181,253,.18)}
   .badge.b-style{background:#081C26;color:#67e8f9;border-color:rgba(103,232,249,.16)}
-  .lnk-lec{color:#93c5fd;border-color:rgba(147,197,253,.25)}
-  .lnk-lec:hover{background:rgba(147,197,253,.07)}
-  .lnk-viv{color:#d8b4fe;border-color:rgba(216,180,254,.25)}
-  .lnk-viv:hover{background:rgba(216,180,254,.07)}
+  .lnk-lec{color:#93c5fd;border-color:rgba(147,197,253,.22)}
+  .lnk-lec:hover{background:rgba(147,197,253,.07);border-color:rgba(147,197,253,.4)}
+  .lnk-viv{color:#d8b4fe;border-color:rgba(216,180,254,.22)}
+  .lnk-viv:hover{background:rgba(216,180,254,.07);border-color:rgba(216,180,254,.4)}
   .conf-bar{background:#3A2030}
-  .score-bar{background:rgba(255,255,255,.06)}
+  .score-bar{background:rgba(255,255,255,.05)}
   .deal-card{border-left-color:var(--gold)}
   .deal-card.d-top{background:linear-gradient(108deg,#2C1A02,#1C1015)}
   .deal-name,.deal-price{color:var(--ink)}
@@ -571,9 +592,8 @@ footer{display:none !important}
   [data-testid="stTabs"] [aria-selected="true"]{
     color:#fda4af !important;border-bottom-color:#fda4af !important;
     background:rgba(253,164,175,.05) !important}
-  .btn-rej{border-color:rgba(253,164,175,.2);color:rgba(253,164,175,.3)}
-  .btn-rej:hover{color:#fda4af;border-color:rgba(253,164,175,.55);
-    background:rgba(253,164,175,.07)}
+  .btn-rej{border-color:rgba(253,164,175,.18);color:rgba(253,164,175,.25)}
+  .btn-rej:hover{color:#fda4af;border-color:rgba(253,164,175,.65);background:rgba(253,164,175,.09)}
   /* Altair : fond transparent déjà géré via CSS, textes adaptés */
   .vega-embed .mark-text text{fill:#EDD5DA !important}
   /* Deals banner */
@@ -3001,7 +3021,7 @@ def wine_card_html(wine: dict, rank: int, max_score: float,
 
     pct = min(100, (score / max_score) * 100) if max_score > 0 else 0
     _rej_link = (
-        f'<a href="?rej={_html.escape(reject_ean)}" class="btn-rej" title="Vivino incorrect">🚫</a>'
+        f'<a href="?rej={_html.escape(reject_ean)}" class="btn-rej" title="Vivino incorrect — signaler">🚫</a>'
     ) if reject_ean else ""
     score_col = (
         f'<div class="score-wrap">'
@@ -3011,9 +3031,14 @@ def wine_card_html(wine: dict, rank: int, max_score: float,
         f'{_rej_link}'
         f'</div>'
     ) if score else (
-        f'<div class="score-wrap" style="color:var(--muted);font-size:.72rem;text-align:center">'
-        f'—{_rej_link}</div>'
+        f'<div class="score-wrap">'
+        f'<div style="color:var(--muted);font-size:.68rem;text-align:right">—</div>'
+        f'{_rej_link}'
+        f'</div>'
     )
+
+    # Prix avec label
+    price_lbl = f'<div style="font-size:.44rem;color:var(--muted);letter-spacing:.07em;text-transform:uppercase;text-align:right;margin-top:.18rem">prix</div>'
 
     # Nom + millésime + indispo sur une ligne, badges en dessous
     name_line = (f'<div class="wine-name">{name_html}'
@@ -3028,7 +3053,7 @@ def wine_card_html(wine: dict, rank: int, max_score: float,
             f'{mil}{links_html}<div>{badges}</div>'
             f'</div>'
             f'{rating_col}'
-            f'{price_col}'
+            f'<div>{price_col}{price_lbl}</div>'
             f'{score_col}'
             f'</div>')
 
