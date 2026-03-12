@@ -345,10 +345,9 @@ footer{display:none !important}
 .p-down{color:#16a34a;font-size:.6rem;font-weight:700;margin-left:2px;vertical-align:middle}
 .p-eq  {color:#9ca3af;font-size:.6rem;margin-left:2px;vertical-align:middle}
 
-/* ── Score Q/P (col 5) + btn-rej ── */
+/* ── Score Q/P (col 5) ── */
 .score-wrap{
-  text-align:right;position:relative;
-  padding-bottom:1.6rem}  /* espace réservé pour btn-rej */
+  text-align:right;position:relative}
 .score-num{
   font-family:'DM Mono';font-size:1rem;color:var(--bx);
   font-weight:700;font-feature-settings:"tnum";line-height:1}
@@ -405,20 +404,38 @@ footer{display:none !important}
   background:rgba(107,26,42,.05) !important;
   border-bottom:2.5px solid var(--bx) !important}
 
-/* ═══════════════ BOUTON 🚫 (dans .score-wrap en position absolue) ═══════════════ */
-.btn-rej{
-  position:absolute;bottom:0;right:0;
-  width:24px;height:22px;
-  display:flex;align-items:center;justify-content:center;
-  font-size:.72rem;line-height:1;text-decoration:none;
-  border:1px solid rgba(220,38,38,.2);border-radius:6px;
-  color:rgba(220,38,38,.3);background:transparent;
-  opacity:0;transform:scale(.88);
-  transition:opacity .18s,transform .18s,color .15s,border-color .15s,background .15s}
-.wine-card:hover .btn-rej{opacity:1;transform:scale(1)}
-.btn-rej:hover{
-  color:#dc2626;border-color:rgba(220,38,38,.65);
-  background:rgba(220,38,38,.08);transform:scale(1.08)}
+/* ═══════════════ BOUTON 🚫 (st.button positionné dans la carte) ═══════════════
+   stHorizontalBlock = contexte de positionnement.
+   La colonne carte prend 100%. La colonne bouton est absolute bas-droit.
+   ═══════════════════════════════════════════════════════════════════════════ */
+div[data-testid="stHorizontalBlock"]:has(button[title*="Vivino incorrect"]){
+  position:relative !important}
+div[data-testid="stHorizontalBlock"]:has(button[title*="Vivino incorrect"])
+> div[data-testid="column"]:first-child{
+  flex:1 1 100% !important;max-width:100% !important;min-width:0 !important}
+div[data-testid="stHorizontalBlock"]:has(button[title*="Vivino incorrect"])
+> div[data-testid="column"]:last-child{
+  position:absolute !important;bottom:.7rem !important;right:.9rem !important;
+  width:auto !important;min-width:0 !important;padding:0 !important;
+  flex:none !important;z-index:20 !important}
+/* Style du bouton */
+div[data-testid="stHorizontalBlock"]:has(button[title*="Vivino incorrect"])
+button[title*="Vivino incorrect"]{
+  height:22px !important;width:26px !important;padding:0 !important;
+  min-height:0 !important;font-size:.78rem !important;line-height:1 !important;
+  background:transparent !important;
+  border:1px solid rgba(220,38,38,.2) !important;
+  border-radius:6px !important;color:rgba(220,38,38,.28) !important;
+  opacity:0 !important;transform:scale(.85) !important;
+  transition:opacity .18s,transform .18s,color .15s,border-color .15s,background .15s !important}
+/* Apparaît au survol de la carte */
+div[data-testid="stHorizontalBlock"]:has(button[title*="Vivino incorrect"]):hover
+button[title*="Vivino incorrect"]{
+  opacity:1 !important;transform:scale(1) !important}
+div[data-testid="stHorizontalBlock"]:has(button[title*="Vivino incorrect"])
+button[title*="Vivino incorrect"]:hover{
+  color:#dc2626 !important;border-color:rgba(220,38,38,.6) !important;
+  background:rgba(220,38,38,.08) !important;transform:scale(1.1) !important}
 
 /* ═══════════════ PAGINATION ═══════════════ */
 .page-info{
@@ -592,8 +609,16 @@ footer{display:none !important}
   [data-testid="stTabs"] [aria-selected="true"]{
     color:#fda4af !important;border-bottom-color:#fda4af !important;
     background:rgba(253,164,175,.05) !important}
-  .btn-rej{border-color:rgba(253,164,175,.18);color:rgba(253,164,175,.25)}
-  .btn-rej:hover{color:#fda4af;border-color:rgba(253,164,175,.65);background:rgba(253,164,175,.09)}
+  div[data-testid="stHorizontalBlock"]:has(button[title*="Vivino incorrect"])
+  button[title*="Vivino incorrect"]{
+    border-color:rgba(253,164,175,.18) !important;color:rgba(253,164,175,.22) !important}
+  div[data-testid="stHorizontalBlock"]:has(button[title*="Vivino incorrect"]):hover
+  button[title*="Vivino incorrect"]{
+    opacity:1 !important;transform:scale(1) !important}
+  div[data-testid="stHorizontalBlock"]:has(button[title*="Vivino incorrect"])
+  button[title*="Vivino incorrect"]:hover{
+    color:#fda4af !important;border-color:rgba(253,164,175,.65) !important;
+    background:rgba(253,164,175,.09) !important}
   /* Altair : fond transparent déjà géré via CSS, textes adaptés */
   .vega-embed .mark-text text{fill:#EDD5DA !important}
   /* Deals banner */
@@ -2930,8 +2955,7 @@ def fmt_count(n) -> str:
     return f"{n:,}".replace(",", "\u202f")
 
 
-def wine_card_html(wine: dict, rank: int, max_score: float,
-                   reject_ean: str | None = None) -> str:
+def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
     cls  = _RANK_CLS.get(rank, "")
     if wine.get("vintage_match") is False: cls = (cls + " vintage-warn").strip()
     if not wine.get("available", True):    cls = (cls + " unavailable").strip()
@@ -3020,22 +3044,15 @@ def wine_card_html(wine: dict, rank: int, max_score: float,
                  f'{price_s}{trend_html}</div>')
 
     pct = min(100, (score / max_score) * 100) if max_score > 0 else 0
-    _rej_link = (
-        f'<a class="btn-rej" title="Vivino incorrect — signaler"'
-        f' onclick="window.location.search=\'?rej={_html.escape(reject_ean)}\'"'
-        f' style="cursor:pointer">🚫</a>'
-    ) if reject_ean else ""
     score_col = (
         f'<div class="score-wrap">'
         f'<div class="score-num">{score:.2f}</div>'
         f'<div class="score-lbl">score Q/P</div>'
         f'<div class="score-bar"><div class="score-fill" style="width:{pct:.1f}%"></div></div>'
-        f'{_rej_link}'
         f'</div>'
     ) if score else (
         f'<div class="score-wrap">'
         f'<div style="color:var(--muted);font-size:.68rem;text-align:right">—</div>'
-        f'{_rej_link}'
         f'</div>'
     )
 
@@ -3629,22 +3646,6 @@ if _price_drops:
             icon="📉"
         )
 
-# ── GESTION QUERY PARAM ?rej= ─────────────────────────────────────────────
-# Quand l'utilisateur clique 🚫 dans une carte, href="?rej=EAN" provoque un
-# rerun. On intercepte le param ici pour ouvrir le formulaire de rejet.
-_rej_ean = st.query_params.get("rej")
-if _rej_ean:
-    # Trouver le vin correspondant et armer le formulaire
-    for _w_tmp in wines:
-        _k_tmp = _w_tmp.get("ean") or build_query(_w_tmp["name"])
-        if _k_tmp == _rej_ean:
-            _idx_tmp = wines.index(_w_tmp)
-            _uid_tmp = f"{slug}_{_w_tmp.get('ean') or _idx_tmp}_0"
-            st.session_state[f"reject_mode_{_uid_tmp}"] = True
-            break
-    st.query_params.clear()
-    st.rerun()
-
 # ── FILTRE ────────────────────────────────────────────────────────────────
 filtered = [w for w in wines
     if price_range[0] <= (w.get("price") or 0) <= price_range[1]
@@ -3780,16 +3781,22 @@ with tab_rank:
             _uid = f"{slug}_{w.get('ean') or i}_{page}"
             _has_viv = bool(w.get("vivino_url"))
             _reject_key = f"reject_mode_{_uid}"
-            # EAN utilisé comme identifiant dans le query param ?rej=
-            _ean_key = w.get("ean") or build_query(w["name"])
 
-            # Carte : le bouton 🚫 est un <a href="?rej=EAN"> dans le HTML de la carte
-            st.markdown(
-                wine_card_html(w, start + i + 1, max_score,
-                               reject_ean=_ean_key if _has_viv else None),
-                unsafe_allow_html=True)
+            if _has_viv:
+                _c_card, _c_btn = st.columns([1, 0.001])
+                with _c_card:
+                    st.markdown(wine_card_html(w, start + i + 1, max_score),
+                                unsafe_allow_html=True)
+                with _c_btn:
+                    if st.button("🚫", key=f"bad_viv_{_uid}",
+                                 help=f"Vivino incorrect — {w['name'][:40]}"):
+                        st.session_state[_reject_key] = True
+                        st.rerun()
+            else:
+                st.markdown(wine_card_html(w, start + i + 1, max_score),
+                            unsafe_allow_html=True)
 
-            # Formulaire de raison — s'affiche si ce vin a été sélectionné pour rejet
+            # Formulaire de rejet — sous la carte si bouton cliqué
             if st.session_state.get(_reject_key):
                 with st.container():
                     st.markdown(
