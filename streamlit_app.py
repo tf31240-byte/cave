@@ -389,31 +389,27 @@ footer{display:none !important}
   border-bottom:2.5px solid var(--bx) !important}
 
 /* ═══════════════ BOUTON 🚫 ═══════════════
-   Principe : la colonne bouton est positionnée absolument au bas-droit
-   de la carte (sur la zone score-wrap) ; la colonne carte prend 100%.
+   Technique : margin-left négatif pour chevaucher le score-wrap,
+   align-self:flex-end pour coller en bas.
+   Pas de position:absolute ni de :has() sur le parent.
    ═══════════════════════════════════════ */
-/* Bloc parent : contexte de positionnement */
-div[data-testid="stHorizontalBlock"]:has(button[title*="Vivino incorrect"]){
-  position:relative !important}
-/* Colonne carte : prend toute la largeur disponible */
-div[data-testid="stHorizontalBlock"]:has(button[title*="Vivino incorrect"])
-> div[data-testid="column"]:not(:has(button[title*="Vivino incorrect"])){
-  flex:1 1 100% !important;max-width:100% !important}
-/* Colonne bouton : absolute, ancrée en bas-droit de la carte */
 div[data-testid="column"]:has(button[title*="Vivino incorrect"]){
-  position:absolute !important;bottom:.52rem !important;right:.55rem !important;
-  width:auto !important;padding:0 !important;z-index:10 !important}
-/* Style bouton : discret, carré, accordé avec score-wrap */
+  flex:0 0 32px !important;width:32px !important;max-width:32px !important;
+  min-width:32px !important;padding:0 !important;
+  margin-left:-38px !important;align-self:flex-end !important;
+  padding-bottom:.55rem !important;z-index:10 !important;
+  position:relative !important}
 div[data-testid="column"] button[title*="Vivino incorrect"]{
-  font-size:.72rem !important;padding:3px 6px !important;
-  min-height:0 !important;height:24px !important;width:26px !important;
-  line-height:1 !important;background:transparent !important;
-  border:1px solid rgba(220,38,38,.18) !important;
-  border-radius:5px !important;color:rgba(220,38,38,.32) !important;
-  transition:color .15s,border-color .15s,background .15s !important}
+  font-size:.8rem !important;padding:0 !important;
+  min-height:0 !important;height:26px !important;width:28px !important;
+  line-height:26px !important;background:transparent !important;
+  border:1px solid rgba(220,38,38,.22) !important;
+  border-radius:5px !important;color:rgba(220,38,38,.35) !important;
+  transition:color .15s,border-color .15s,background .15s !important;
+  display:flex !important;align-items:center !important;justify-content:center !important}
 div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
-  color:#dc2626 !important;border-color:rgba(220,38,38,.55) !important;
-  background:rgba(220,38,38,.06) !important}
+  color:#dc2626 !important;border-color:rgba(220,38,38,.6) !important;
+  background:rgba(220,38,38,.07) !important}
 
 /* ═══════════════ PAGINATION ═══════════════ */
 .page-info{
@@ -587,11 +583,11 @@ div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
     color:#fda4af !important;border-bottom-color:#fda4af !important;
     background:rgba(253,164,175,.05) !important}
   div[data-testid="column"] button[title*="Vivino incorrect"]{
-    border-color:rgba(253,164,175,.18) !important;
-    color:rgba(253,164,175,.28) !important}
+    border-color:rgba(253,164,175,.2) !important;
+    color:rgba(253,164,175,.3) !important}
   div[data-testid="column"] button[title*="Vivino incorrect"]:hover{
-    color:#fda4af !important;border-color:rgba(253,164,175,.48) !important;
-    background:rgba(253,164,175,.06) !important}
+    color:#fda4af !important;border-color:rgba(253,164,175,.55) !important;
+    background:rgba(253,164,175,.07) !important}
   /* Altair : fond transparent déjà géré via CSS, textes adaptés */
   .vega-embed .mark-text text{fill:#EDD5DA !important}
   /* Deals banner */
