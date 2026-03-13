@@ -3176,13 +3176,19 @@ for k, v in [("wines",[]),("loaded_slug",None),("data_ready",False),
 # @st.cache_resource = exécution 1× par instance (pas à chaque rerun)
 @st.cache_resource
 def _startup_restore():
-    """Restaure les données depuis le Gist si le filesystem local est vide."""
-    has_data = any(CACHE_DIR.glob("*.json"))
+    """Restaure les données depuis le Gist si les fichiers de données sont absents."""
+    # Vérifier que des fichiers de DONNÉES existent (pas juste job_state/ckpt)
+    _data_files = {
+        "leclerc_vins-rouges.json", "leclerc_vins-blancs.json",
+        "leclerc_vins-roses.json", "leclerc_vins-mousseux-et-petillants.json",
+        "vivino_vins-rouges.json", "vivino_vins-blancs.json",
+        "vivino_vins-roses.json", "vivino_vins-mousseux-et-petillants.json",
+    }
+    has_data = any((CACHE_DIR / f).exists() for f in _data_files)
     if not has_data:
         n = restore_from_gist()
         if n > 0:
             return f"✅ {n} fichiers restaurés depuis le Gist"
-        # Gist configuré mais vide (avant le 1er scraping) → silencieux
     return None
 
 # Toast affiché 1× par session uniquement (pas à chaque rerun)
