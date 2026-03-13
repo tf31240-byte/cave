@@ -912,16 +912,64 @@ def _normalize_vivino_entry(entry: dict) -> dict:
 
 
 def load_vivino_cache(slug: str = "vins-rouges") -> dict:
-    p = _viv_path(slug)
+    """Charge le cache Vivino avec protection contre la corruption.
+
+    Si le fichier local est absent ou vide, tente de restaurer depuis :
+    1. Le backup .bak local
+    2. Le Gist GitHub (si configuré)
+    """
+    p   = _viv_path(slug)
+    bak = p.with_suffix(".bak")
+
     raw = _read_json_cached(p, ttl=_MEM_CACHE_TTL)
+
+    # ── Récupération si fichier local absent ou corrompu ─────────────────
+    if not isinstance(raw, dict) or len(raw) == 0:
+        # Tentative 1 : backup .bak local
+        if bak.exists():
+            try:
+                bak_raw = json.loads(bak.read_text("utf-8"))
+                if isinstance(bak_raw, dict) and len(bak_raw) > 0:
+                    import logging
+                    logging.warning(f"[ScoreMaster] load_vivino_cache({slug}): "
+                                    f"fichier principal vide/absent, restauration depuis .bak "
+                                    f"({len(bak_raw)} entrées)")
+                    bak.replace(p)   # restaure le backup comme fichier principal
+                    _invalidate_mem_cache(p)
+                    raw = bak_raw
+            except Exception:
+                pass
+        # Tentative 2 : Gist
+        if not isinstance(raw, dict) or len(raw) == 0:
+            if _gist_is_configured():
+                try:
+                    gid = _gist_id()
+                    resp = requests.get(f"{_GIST_API}/{gid}",
+                                        headers=_gist_headers(), timeout=15)
+                    resp.raise_for_status()
+                    fname = f"vivino_{slug}.json"
+                    fdata = resp.json().get("files", {}).get(fname, {})
+                    content = fdata.get("content", "")
+                    if content:
+                        gist_raw = json.loads(content)
+                        if isinstance(gist_raw, dict) and len(gist_raw) > 0:
+                            import logging
+                            logging.warning(f"[ScoreMaster] load_vivino_cache({slug}): "
+                                            f"restauration depuis Gist ({len(gist_raw)} entrées)")
+                            p.write_text(content, "utf-8")
+                            _invalidate_mem_cache(p)
+                            raw = gist_raw
+                except Exception:
+                    pass
+
     if not isinstance(raw, dict):
         return {}
+
     ttl_secs = VIVINO_CACHE_TTL_DAYS * 86400
     now = time.time()
     result = {}
     for k, v in raw.items():
         entry = _normalize_vivino_entry(v)
-        # Marquer les entrées non-verrouillées dépassant le TTL comme stales
         age = now - (entry.get("cached_at") or 0)
         entry["_stale"] = (
             not entry.get("locked")
@@ -931,15 +979,65 @@ def load_vivino_cache(slug: str = "vins-rouges") -> dict:
         result[k] = entry
     return result
 
-def save_vivino_cache(cache: dict, slug: str = "vins-rouges") -> None:
-    p, tmp = _viv_path(slug), _viv_path(slug).with_suffix(".tmp")
+def save_vivino_cache(cache: dict, slug: str = "vins-rouges",
+                      _force_gist: bool = False) -> None:
+    """Sauvegarde le cache Vivino de façon sécurisée.
+
+    Protections :
+    - Écriture atomique via .tmp → rename
+    - Backup .bak du fichier existant avant écrasement
+    - Guard anti-régression : refuse d'écraser si len(cache) < 50% du fichier existant
+      (protège contre l'écrasement accidentel avec un dict vide ou partiel)
+    - _force_gist=True : bypass le throttle 30s pour forcer le push final
+    """
+    p   = _viv_path(slug)
+    tmp = p.with_suffix(".tmp")
+    bak = p.with_suffix(".bak")
+
+    # ── Guard anti-régression ─────────────────────────────────────────────
+    if p.exists() and len(cache) == 0:
+        # Ne jamais écraser avec un dict vide
+        import logging
+        logging.warning(f"[ScoreMaster] save_vivino_cache({slug}): refus d'écraser {p.name} "
+                        f"avec un dict vide.")
+        return
+    if p.exists():
+        try:
+            _existing = json.loads(p.read_text("utf-8"))
+            n_existing = len(_existing) if isinstance(_existing, dict) else 0
+            if n_existing > 10 and len(cache) < n_existing // 2:
+                import logging
+                logging.warning(
+                    f"[ScoreMaster] save_vivino_cache({slug}): refus d'écraser "
+                    f"{p.name} ({n_existing} entrées) avec {len(cache)} entrées "
+                    f"(< 50% — probable corruption). Sauvegarde annulée."
+                )
+                return
+        except Exception:
+            pass  # Fichier illisible → on laisse l'écrasement se faire
+
     try:
         data_str = json.dumps(cache, ensure_ascii=False, indent=2)
+        # Backup atomique du fichier existant
+        if p.exists():
+            try:
+                import shutil
+                shutil.copy2(p, bak)
+            except Exception:
+                pass
         tmp.write_text(data_str, "utf-8")
         tmp.replace(p)
         _invalidate_mem_cache(p)
-        _gist_push_async(p.name, data_str)  # persistance cloud
-    except Exception: tmp.unlink(missing_ok=True); raise
+        if _force_gist:
+            # Push immédiat bypass throttle (fin de scraping)
+            threading.Thread(
+                target=gist_push, args=(p.name, data_str), daemon=True
+            ).start()
+        else:
+            _gist_push_async(p.name, data_str)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2681,7 +2779,7 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
         else:
             need_selenium.append((w, region))
 
-    save_vivino_cache(vc, slug)
+    save_vivino_cache(vc, slug, _force_gist=True)   # fin Phase 1 → push Gist forcé
     phase1_found = found
     if log: log(f"  ✅ Phase 1 : {phase1_found} notes, {len(need_selenium)} vins restants pour Selenium")
 
@@ -2719,7 +2817,7 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
         if driver is not None:
             try: driver.quit()
             except Exception: pass
-        save_vivino_cache(vc, slug)
+        save_vivino_cache(vc, slug, _force_gist=True)   # fin Phase 2 → push Gist forcé
         remaining = len(wines) - done_count
         if interrupted or remaining > 0:
             if log: log(f"\n⚠️ {done_count}/{len(wines)} traités · {remaining} restants\n"
@@ -3176,19 +3274,51 @@ for k, v in [("wines",[]),("loaded_slug",None),("data_ready",False),
 # @st.cache_resource = exécution 1× par instance (pas à chaque rerun)
 @st.cache_resource
 def _startup_restore():
-    """Restaure les données depuis le Gist si les fichiers de données sont absents."""
-    # Vérifier que des fichiers de DONNÉES existent (pas juste job_state/ckpt)
+    """Restaure les données depuis le Gist si des fichiers de données sont absents.
+
+    Protections :
+    - Vérifie chaque fichier de données individuellement (pas juste "y a-t-il un .json")
+    - Restaure aussi les backups .bak si le fichier principal est absent
+    - Lance une restauration partielle si seuls certains fichiers manquent
+    """
     _data_files = {
         "leclerc_vins-rouges.json", "leclerc_vins-blancs.json",
-        "leclerc_vins-roses.json", "leclerc_vins-mousseux-et-petillants.json",
-        "vivino_vins-rouges.json", "vivino_vins-blancs.json",
-        "vivino_vins-roses.json", "vivino_vins-mousseux-et-petillants.json",
+        "leclerc_vins-roses.json",  "leclerc_vins-mousseux-et-petillants.json",
+        "vivino_vins-rouges.json",  "vivino_vins-blancs.json",
+        "vivino_vins-roses.json",   "vivino_vins-mousseux-et-petillants.json",
     }
-    has_data = any((CACHE_DIR / f).exists() for f in _data_files)
-    if not has_data:
-        n = restore_from_gist()
-        if n > 0:
-            return f"✅ {n} fichiers restaurés depuis le Gist"
+    # Récupérer les fichiers manquants
+    missing = [f for f in _data_files if not (CACHE_DIR / f).exists()]
+    if not missing:
+        return None   # tout est là
+
+    # Tentative 1 : backups .bak locaux pour les fichiers Vivino
+    restored_local = 0
+    still_missing = []
+    for fname in missing:
+        bak = (CACHE_DIR / fname).with_suffix(".bak")
+        if bak.exists():
+            try:
+                content = bak.read_text("utf-8")
+                parsed  = json.loads(content)
+                if isinstance(parsed, dict) and len(parsed) > 0:
+                    (CACHE_DIR / fname).write_text(content, "utf-8")
+                    restored_local += 1
+                    continue
+            except Exception:
+                pass
+        still_missing.append(fname)
+
+    if not still_missing:
+        return f"✅ {restored_local} fichier(s) restaurés depuis backup local"
+
+    # Tentative 2 : Gist pour les fichiers encore manquants
+    if not _gist_is_configured():
+        return None
+    n = restore_from_gist()
+    total = restored_local + n
+    if total > 0:
+        return f"✅ {total} fichier(s) restaurés (Gist : {n}, backup local : {restored_local})"
     return None
 
 # Toast affiché 1× par session uniquement (pas à chaque rerun)
