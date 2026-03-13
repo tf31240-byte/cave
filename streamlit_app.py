@@ -480,6 +480,26 @@ div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]) button:hover{
   background:linear-gradient(90deg,#8B2A3A,var(--gold))}
 .cov-fill.cov-full{background:#16a34a}
 
+/* ═══════════════ CARTE PROGRESSION SCRAPING ═══════════════ */
+.job-card{
+  background:rgba(255,255,255,.05);
+  border-left:3px solid rgba(201,168,76,.6);
+  border-radius:8px;
+  padding:.6rem .75rem;margin:.4rem 0 .5rem}
+.job-title{
+  font-size:.7rem;font-weight:600;color:#E8D0D5;
+  letter-spacing:.02em;margin-bottom:.45rem}
+.job-bar{
+  height:4px;background:rgba(255,255,255,.1);
+  border-radius:99px;overflow:hidden;margin-bottom:.35rem}
+.job-fill{
+  height:100%;border-radius:99px;
+  background:linear-gradient(90deg,#8B2A3A,var(--gold));
+  transition:width .6s ease}
+.job-meta{
+  font-size:.58rem;color:rgba(200,168,180,.55);
+  font-family:'DM Mono';letter-spacing:.03em}
+
 /* ═══════════════ COMPTEUR FILTRES ═══════════════ */
 .filter-counter{
   display:inline-flex;align-items:center;gap:.4rem;
@@ -776,17 +796,20 @@ def gist_pull_all() -> dict:
 
 
 _gist_push_last: dict[str, float] = {}   # filename → last push timestamp
+_gist_push_lock = threading.Lock()       # protection accès concurrent
 _GIST_PUSH_MIN_INTERVAL = 30.0           # seconds entre 2 push du même fichier
 
-def _gist_push_async(filename: str, content: str) -> None:
+def _gist_push_async(filename: str, content: str, force: bool = False) -> None:
     """Push non-bloquant throttlé : max 1 push par fichier toutes les 30s.
-    Évite la saturation de threads lors des sauvegardes incrémentielles du scraping."""
+    Évite la saturation de threads lors des sauvegardes incrémentielles du scraping.
+    force=True : bypasse le throttle (fin de scraping, correction manuelle)."""
     if not _gist_is_configured():
         return
     now = time.time()
-    if now - _gist_push_last.get(filename, 0) < _GIST_PUSH_MIN_INTERVAL:
-        return   # trop tôt — skip ce push, le prochain sera envoyé
-    _gist_push_last[filename] = now
+    with _gist_push_lock:
+        if not force and now - _gist_push_last.get(filename, 0) < _GIST_PUSH_MIN_INTERVAL:
+            return   # trop tôt — skip ce push
+        _gist_push_last[filename] = now
     threading.Thread(
         target=gist_push, args=(filename, content), daemon=True
     ).start()
@@ -859,9 +882,34 @@ def load_leclerc_cache(slug: str) -> dict | None:
 
 def save_leclerc_cache(slug: str, wines: list) -> None:
     p, tmp = _lec_path(slug), _lec_path(slug).with_suffix(".tmp")
+    bak = _lec_path(slug).with_suffix(".bak")
+
+    # Guard anti-régression : refus d'écraser avec liste vide ou réduite de > 50%
+    if p.exists():
+        try:
+            _ex = json.loads(p.read_text("utf-8"))
+            n_ex = len(_ex.get("wines", [])) if isinstance(_ex, dict) else 0
+            if n_ex > 0 and len(wines) == 0:
+                import logging
+                logging.warning(f"[ScoreMaster] save_leclerc_cache({slug}): refus d'écraser "
+                                f"avec liste vide ({n_ex} vins existants).")
+                return
+            if n_ex >= 5 and len(wines) < n_ex // 2:
+                import logging
+                logging.warning(f"[ScoreMaster] save_leclerc_cache({slug}): refus d'écraser "
+                                f"({n_ex} vins) avec {len(wines)} vins (< 50%).")
+                return
+        except Exception:
+            pass
+
     try:
         data_str = json.dumps({"cached_at": time.time(), "slug": slug, "wines": wines},
                               ensure_ascii=False, indent=2)
+        if p.exists():
+            try:
+                import shutil; shutil.copy2(p, bak)
+            except Exception:
+                pass
         tmp.write_text(data_str, "utf-8")
         tmp.replace(p)
         _invalidate_mem_cache(p)
@@ -995,26 +1043,29 @@ def save_vivino_cache(cache: dict, slug: str = "vins-rouges",
     bak = p.with_suffix(".bak")
 
     # ── Guard anti-régression ─────────────────────────────────────────────
-    if p.exists() and len(cache) == 0:
-        # Ne jamais écraser avec un dict vide
-        import logging
-        logging.warning(f"[ScoreMaster] save_vivino_cache({slug}): refus d'écraser {p.name} "
-                        f"avec un dict vide.")
-        return
     if p.exists():
         try:
             _existing = json.loads(p.read_text("utf-8"))
             n_existing = len(_existing) if isinstance(_existing, dict) else 0
-            if n_existing > 10 and len(cache) < n_existing // 2:
-                import logging
-                logging.warning(
-                    f"[ScoreMaster] save_vivino_cache({slug}): refus d'écraser "
-                    f"{p.name} ({n_existing} entrées) avec {len(cache)} entrées "
-                    f"(< 50% — probable corruption). Sauvegarde annulée."
-                )
-                return
         except Exception:
-            pass  # Fichier illisible → on laisse l'écrasement se faire
+            n_existing = 0  # fichier illisible → on laisse l'écrasement
+
+        # Refus absolu : ne jamais écraser avec un dict vide
+        if n_existing > 0 and len(cache) == 0:
+            import logging
+            logging.warning(f"[ScoreMaster] save_vivino_cache({slug}): refus d'écraser "
+                            f"{p.name} ({n_existing} entrées) avec un dict vide.")
+            return
+
+        # Refus si régression > 50% (sauf si le cache existant est lui-même très petit)
+        if n_existing >= 3 and len(cache) < n_existing // 2:
+            import logging
+            logging.warning(
+                f"[ScoreMaster] save_vivino_cache({slug}): refus d'écraser "
+                f"{p.name} ({n_existing} entrées) avec {len(cache)} entrées "
+                f"(< 50% — probable corruption). Sauvegarde annulée."
+            )
+            return
 
     try:
         data_str = json.dumps(cache, ensure_ascii=False, indent=2)
@@ -3459,105 +3510,117 @@ with st.sidebar:
 
 
     job = load_job_state()
-
-    # FIX D : si un job tourne sur un AUTRE slug, désactiver tous les boutons
-    # d'action et afficher un avertissement clair. Sans ça, l'utilisateur peut
-    # lancer un 2e job en parallèle (depuis la vue d'un autre type de vin),
-    # ce qui corrompt job_state.json et produit des résultats imprévisibles.
     _any_job_running = job.get("status") in {"running", "queued"}
     _cross_slug_job  = _any_job_running and job.get("slug") != slug
-    _cross_slug_label = next(
+    _job_slug_label  = next(
         (k for k, v in WINE_TYPES.items() if v == job.get("slug")), job.get("slug", "")
-    ) if _cross_slug_job else ""
+    )
 
-    if _cross_slug_job:
-        st.info(
-            f"⏳ Scraping **{_cross_slug_label}** en cours…\n\n"
-            f"Les actions sont désactivées pendant ce temps.",
-            icon=None,
-        )
-
-    btn_stock  = st.button("🔄 Vérifier disponibilité", use_container_width=True, type="primary",
-                           help="Vérifie les vins en rayon. Vivino depuis le cache.",
-                           disabled=_any_job_running)
-    btn_vivino = st.button("🍷 Rafraîchir toutes les notes (arrière-plan)", use_container_width=True,
-                           help="Lance le scraping Vivino en tâche de fond pour continuer à utiliser l'app.",
-                           disabled=_any_job_running)
-    # Bouton réparer les prix — visible si des vins ont prix=0
-    n_zero_price = sum(1 for w in (lc["wines"] if lc else []) if not w.get("price"))
-    btn_repair_prices = False
-    if n_zero_price > 0 and lc:
-        btn_repair_prices = st.button(
-            f"🔧 Réparer les prix manquants ({n_zero_price})",
-            use_container_width=True,
-            help=f"{n_zero_price} vins ont un prix à 0€ — rescraping pour récupérer les vrais prix.",
-            type="primary",
-            disabled=_any_job_running,
-        )
-
-    btn_fill = False
-    if n_missing > 0 and lc:
-        btn_fill = st.button(f"🔎 Compléter les manquants ({n_missing}) (arrière-plan)",
-                             use_container_width=True,
-                             help=f"Scrape uniquement les {n_missing} vins sans données Vivino en tâche de fond.",
-                             disabled=_any_job_running)
-    n_stale_total = sum(1 for v in vc.values() if v.get("_stale"))
-    btn_stale = False
-    if n_stale_total > 0 and lc:
-        btn_stale = st.button(f"⏳ Rafraîchir obsolètes ({n_stale_total}) (arrière-plan)",
-                              use_container_width=True,
-                              help=f"{n_stale_total} notes Vivino datent de plus de {VIVINO_CACHE_TTL_DAYS} jours.",
-                              disabled=_any_job_running)
-
-    ckpt = ckpt_load(slug)
-    btn_resume = False
-    if ckpt:
-        n_done = len(ckpt["done_eans"])
-        pct    = int(100 * n_done / max(ckpt["total"], 1))
-        st.warning(f"⚠️ **Scraping interrompu**\n\n"
-                   f"{n_done}/{ckpt['total']} vins traités ({pct}%)\n\n"
-                   f"Lancé {fmt_age(ckpt['started_at'])}", icon=None)
-        col_r, col_x = st.columns(2)
-        with col_r: btn_resume = st.button("▶️ Reprendre", use_container_width=True, type="primary",
-                                            disabled=_cross_slug_job)
-        with col_x:
-            if st.button("✖ Annuler", use_container_width=True):
-                ckpt_finish(slug); st.rerun()
-
-    # ④ CORRIGÉ : auto_live sans time.sleep() dans le thread principal.
-    # L'ancien code faisait time.sleep(5) + st.rerun() à chaque cycle,
-    # bloquant le serveur Streamlit pour tous les utilisateurs pendant 5s.
-    # Nouvelle approche : st.rerun() immédiat avec un délai minimum géré via
-    # session_state (last_live_refresh) pour éviter les boucles infinies.
-    auto_live = st.checkbox("🟢 Suivi temps réel (auto ~1.5s)", value=True,
-                            key="auto_live_chk",
-                            help="Met à jour l'ensemble de l'interface toutes les 2s pendant un scraping.")
-    # Propager la préférence pour le trigger en haut de script
-    st.session_state["auto_live"] = auto_live
-
-    _job_slug       = job.get("slug", "")
-    _job_slug_label = next((k for k, v in WINE_TYPES.items() if v == _job_slug), _job_slug)
-    _slug_prefix    = f"[{_job_slug_label}] " if _job_slug and _job_slug != slug else ""
-    if job.get("status") in {"running", "queued"}:
-        msg = job.get("message", "")
-        age = fmt_age(job.get("updated_at", 0))
+    # ── MODE SCRAPING : carte de progression, boutons masqués ────────────
+    if _any_job_running:
+        msg    = job.get("message", "")
+        age    = fmt_age(job.get("updated_at", 0))
         m_prog = _PROGRESS_RE.search(msg)
+
         if m_prog:
             done_n, total_n = int(m_prog.group(1)), int(m_prog.group(2))
-            pct = done_n / max(total_n, 1)
-            st.progress(pct, text=f"⏳ {_slug_prefix}{done_n}/{total_n} vins · {age}")
+            pct_int = int(100 * done_n / max(total_n, 1))
+            _pct_w  = f"{pct_int}%"
+            _cross_note = f" · {_job_slug_label}" if _cross_slug_job else ""
+            st.markdown(
+                f'<div class="job-card">'
+                f'<div class="job-title">⏳ Scraping en cours{_cross_note}</div>'
+                f'<div class="job-bar"><div class="job-fill" style="width:{_pct_w}"></div></div>'
+                f'<div class="job-meta">{done_n} / {total_n} vins · {pct_int}% · {age}</div>'
+                f'</div>',
+                unsafe_allow_html=True)
         else:
-            st.info(f"⏳ {_slug_prefix}Job en cours ({job.get('mode')})\n\n{msg}\n\nMàj: {age}", icon=None)
-    elif job.get("status") == "done" and _job_slug == slug:
-        done_key = f"_job_done_toasted_{job.get('finished_at',0)}"
-        if not st.session_state.get(done_key):
-            st.session_state[done_key] = True
-            st.toast(job.get("message", "✅ Job terminé"), icon="✅")
-    elif job.get("status") == "error":
-        err_key = f"_job_err_toasted_{job.get('finished_at',0)}"
-        if not st.session_state.get(err_key):
-            st.session_state[err_key] = True
-            st.toast(f"❌ {_slug_prefix}Erreur : {job.get('error','inconnue')}", icon="❌")
+            st.markdown(
+                f'<div class="job-card">'
+                f'<div class="job-title">⏳ {_job_slug_label} — démarrage…</div>'
+                f'<div class="job-bar"><div class="job-fill" style="width:5%"></div></div>'
+                f'<div class="job-meta">{age}</div>'
+                f'</div>',
+                unsafe_allow_html=True)
+
+        # Bouton stop uniquement si même slug (sinon lecture seule)
+        if not _cross_slug_job:
+            if st.button("⏹ Arrêter le scraping", use_container_width=True):
+                ckpt_finish(slug)
+                save_job_state({"status": "done", "slug": slug, "mode": "stopped",
+                                "message": "Arrêté par l'utilisateur.",
+                                "finished_at": time.time()})
+                st.rerun()
+
+    # ── MODE NORMAL : boutons d'action ────────────────────────────────────
+    else:
+        # Checkpoint interrompu ?
+        ckpt = ckpt_load(slug)
+        if ckpt:
+            n_done = len(ckpt["done_eans"])
+            pct    = int(100 * n_done / max(ckpt["total"], 1))
+            st.markdown(
+                f'<div class="job-card" style="border-left-color:#f59e0b">'
+                f'<div class="job-title" style="color:#f59e0b">⚠️ Scraping interrompu</div>'
+                f'<div class="job-bar"><div class="job-fill" style="width:{pct}%;background:#f59e0b"></div></div>'
+                f'<div class="job-meta">{n_done}/{ckpt["total"]} vins ({pct}%) · {fmt_age(ckpt["started_at"])}</div>'
+                f'</div>',
+                unsafe_allow_html=True)
+            col_r, col_x = st.columns(2)
+            with col_r: btn_resume = st.button("▶️ Reprendre", use_container_width=True, type="primary")
+            with col_x:
+                if st.button("✖ Annuler", use_container_width=True):
+                    ckpt_finish(slug); st.rerun()
+        else:
+            btn_resume = False
+
+        btn_stock  = st.button("🔄 Mettre à jour le catalogue",
+                               use_container_width=True, type="primary",
+                               help="Vérifie les vins en rayon.")
+        btn_vivino = st.button("🍷 Rafraîchir les notes Vivino",
+                               use_container_width=True,
+                               help="Relance le scraping Vivino en arrière-plan.")
+
+        n_zero_price  = sum(1 for w in (lc["wines"] if lc else []) if not w.get("price"))
+        n_stale_total = sum(1 for v in vc.values() if v.get("_stale"))
+        btn_repair_prices = False
+        btn_fill          = False
+        btn_stale         = False
+
+        if n_zero_price > 0 and lc:
+            btn_repair_prices = st.button(
+                f"🔧 Réparer les prix ({n_zero_price})",
+                use_container_width=True,
+                help=f"{n_zero_price} vins ont un prix à 0€.")
+
+        if n_missing > 0 and lc:
+            btn_fill = st.button(
+                f"🔎 Compléter les manquants ({n_missing})",
+                use_container_width=True,
+                help=f"Scrape les {n_missing} vins sans données Vivino.")
+
+        if n_stale_total > 0 and lc:
+            btn_stale = st.button(
+                f"⏳ Rafraîchir les notes obsolètes ({n_stale_total})",
+                use_container_width=True,
+                help=f"{n_stale_total} notes datent de plus de {VIVINO_CACHE_TTL_DAYS} jours.")
+
+        # Statut job terminé / erreur
+        if job.get("status") == "done" and job.get("slug") == slug:
+            done_key = f"_job_done_toasted_{job.get('finished_at',0)}"
+            if not st.session_state.get(done_key):
+                st.session_state[done_key] = True
+                st.toast(job.get("message", "✅ Terminé"), icon="✅")
+        elif job.get("status") == "error":
+            err_key = f"_job_err_toasted_{job.get('finished_at',0)}"
+            if not st.session_state.get(err_key):
+                st.session_state[err_key] = True
+                st.toast(f"❌ {job.get('error','Erreur inconnue')}", icon="❌")
+
+    # Checkbox suivi temps réel (toujours visible)
+    auto_live = st.checkbox("🟢 Suivi en temps réel", value=True, key="auto_live_chk",
+                            help="Rafraîchit l'interface automatiquement pendant le scraping.")
+    st.session_state["auto_live"] = auto_live
 
     st.markdown(
         f'<div style="font-size:.6rem;color:rgba(200,168,176,.4);margin:.3rem 0 .1rem;letter-spacing:.05em">'
