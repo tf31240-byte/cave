@@ -3256,11 +3256,12 @@ def _make_wines_df(ws: list) -> "pd.DataFrame":
     } for w in ws])
 
 _DF_COL_CONFIG = {
-    "Leclerc":  st.column_config.LinkColumn(display_text="🛒"),
-    "Vivino":   st.column_config.LinkColumn(display_text="🍷"),
-    "Prix (€)": st.column_config.NumberColumn(format="%.2f"),
-    "Note":     st.column_config.NumberColumn(format="%.1f"),
-    "Score":    st.column_config.NumberColumn(format="%.2f"),
+    "Leclerc":   st.column_config.LinkColumn(display_text="🛒"),
+    "Vivino":    st.column_config.LinkColumn(display_text="🍷"),
+    "Prix (€)":  st.column_config.NumberColumn(format="%.2f"),
+    "Note":      st.column_config.NumberColumn(format="%.1f"),
+    "Score":     st.column_config.NumberColumn(format="%.2f"),
+    "Millésime": st.column_config.TextColumn(),   # évite la conversion int64 sur chaînes vides
 }
 
 def _make_logger(max_lines: int = 10):
@@ -3406,12 +3407,18 @@ if _early_job.get("status") in {"running", "queued"}:
 def _live_polling():
     if not st.session_state.get("auto_live", True):
         return
+    # Cooldown : ne pas déclencher deux reruns complets en moins de 1.8s
+    _now = time.time()
+    if _now - st.session_state.get("_last_full_rerun", 0.0) < 1.8:
+        return
     _j = load_job_state()
     _st = _j.get("status")
     if _st in {"running", "queued"}:
+        st.session_state["_last_full_rerun"] = _now
         st.rerun(scope="app")
     elif _st in {"done", "error"}:
-        if time.time() - (_j.get("finished_at") or 0) < 6.0:
+        if _now - (_j.get("finished_at") or 0) < 6.0:
+            st.session_state["_last_full_rerun"] = _now
             st.rerun(scope="app")
 
 _live_polling()
