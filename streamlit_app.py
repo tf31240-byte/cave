@@ -3516,6 +3516,11 @@ with st.sidebar:
         (k for k, v in WINE_TYPES.items() if v == job.get("slug")), job.get("slug", "")
     )
 
+    # Initialisation — toutes les variables bouton à False
+    # (certaines ne sont définies que dans le bloc else / mode normal)
+    btn_stock = btn_vivino = btn_repair_prices = False
+    btn_fill  = btn_stale  = btn_resume        = False
+
     # ── MODE SCRAPING : carte de progression, boutons masqués ────────────
     if _any_job_running:
         msg    = job.get("message", "")
