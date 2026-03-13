@@ -405,36 +405,33 @@ footer{display:none !important}
   border-bottom:2.5px solid var(--bx) !important}
 
 /* ═══════════════ BOUTON 🚫 ═══════════════
-   Le st.button suit immédiatement le st.markdown de la carte.
-   margin-top négatif le fait remonter sur le coin bas-droit de la carte.
+   Le st.button suit le st.markdown de la carte.
+   margin-top négatif + position absolute le place au coin bas-droit de la carte.
    ══════════════════════════════════════ */
 div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]){
-  margin-top:-2.55rem !important;
-  margin-bottom:.35rem !important;
-  display:flex !important;
-  justify-content:flex-end !important;
-  padding-right:1rem !important;
-  position:relative !important;
-  z-index:10 !important;
+  position:absolute !important;
+  margin-top:-2.15rem !important;
+  right:.55rem !important;
+  width:auto !important;
+  z-index:20 !important;
   pointer-events:none !important}
 div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]) button{
   pointer-events:auto !important;
-  height:22px !important;width:26px !important;padding:0 !important;
-  min-height:0 !important;font-size:.76rem !important;line-height:1 !important;
+  height:20px !important;width:24px !important;padding:0 !important;
+  min-height:0 !important;font-size:.72rem !important;line-height:1 !important;
   background:transparent !important;
   border:1px solid rgba(220,38,38,.2) !important;
-  border-radius:6px !important;color:rgba(220,38,38,.3) !important;
+  border-radius:5px !important;color:rgba(220,38,38,.28) !important;
   opacity:0 !important;transform:scale(.85) !important;
   transition:opacity .15s,transform .15s,color .13s,
              border-color .13s,background .13s !important}
-/* Visible quand la carte OU le bouton est survolé */
-div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]):hover button,
-div[data-testid="stMarkdownContainer"]:has(+ div[data-testid="stButton"]
-  button[title*="Vivino incorrect"]):hover
-~ div[data-testid="stButton"] button{
+/* Apparaît au survol de la carte */
+div[data-testid="stMarkdownContainer"]:has(.wine-card):hover
+~ div[data-testid="stButton"] button[title*="Vivino incorrect"],
+div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]):hover button{
   opacity:1 !important;transform:scale(1) !important}
 div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]) button:hover{
-  opacity:1 !important;transform:scale(1.1) !important;
+  opacity:1 !important;transform:scale(1.12) !important;
   color:#dc2626 !important;border-color:rgba(220,38,38,.65) !important;
   background:rgba(220,38,38,.08) !important}
 
@@ -3317,8 +3314,7 @@ st.markdown(
     '<hr class="title-rule">',
     unsafe_allow_html=True)
 
-for k, v in [("wines",[]),("loaded_slug",None),("data_ready",False),
-             ("last_live_refresh", 0.0)]:
+for k, v in [("wines",[]),("loaded_slug",None),("data_ready",False)]:
     if k not in st.session_state: st.session_state[k] = v
 
 # ── Restauration Gist au démarrage ───────────────────────────────────────
@@ -3402,37 +3398,25 @@ if _early_job.get("status") in {"running", "queued"}:
                 st.session_state.loaded_slug = _early_slug
                 st.session_state.data_ready  = True
 
-# ── AUTO-RERUN ────────────────────────────────────────────────────────────
-# Déclencher le rerun ici (avant tout rendu) garantit que les onglets
-# reçoivent les données fraîches chargées ci-dessus, et non les données
-# du cycle précédent.
-_cur_slug     = st.session_state.get("loaded_slug")   # cache — accédé 4× ci-dessous
-_auto_live_on = st.session_state.get("auto_live", True)
-# _job_is_live : job actif sur le slug que l'utilisateur consulte → rerun rapide 1.5s
-_job_is_live  = (
-    _early_job.get("status") in {"running", "queued"}
-    and _early_job.get("slug") == _cur_slug
-)
-# _job_cross_slug : job actif sur un AUTRE slug → rerun lent 4s (pour rafraîchir
-# la barre de progression + console sans risquer une oscillation de l'UI, puisque
-# FIX A empêche désormais l'écrasement du loaded_slug par le slug du job).
-_job_cross_slug = (
-    _early_job.get("status") in {"running", "queued"}
-    and _early_job.get("slug") != _cur_slug
-)
-# Continuer le rerun 6s après la fin du job pour capturer les dernières lignes de log
-_job_just_done = (
-    _early_job.get("status") in {"done", "error"}
-    and time.time() - (_early_job.get("finished_at") or 0) < 6.0
-    and _early_job.get("slug") == _cur_slug
-)
-if _auto_live_on and (_job_is_live or _job_just_done or _job_cross_slug):
-    _now_top = time.time()
-    _interval = 1.5 if (_job_is_live or _job_just_done) else 4.0
-    _elapsed = _now_top - st.session_state.get("last_live_refresh", 0.0)
-    if _elapsed >= _interval:
-        st.session_state["last_live_refresh"] = _now_top
-        st.rerun()
+# ── SUIVI EN TEMPS RÉEL ───────────────────────────────────────────────────
+# st.fragment(run_every=N) se réexécute automatiquement toutes les N secondes,
+# sans nécessiter d'interaction utilisateur. Quand un job est actif, il
+# déclenche un rerun complet de l'app (scope="app") pour rafraîchir toute l'UI.
+@st.fragment(run_every=2)
+def _live_polling():
+    if not st.session_state.get("auto_live", True):
+        return
+    _j = load_job_state()
+    _st = _j.get("status")
+    if _st in {"running", "queued"}:
+        st.rerun(scope="app")
+    elif _st in {"done", "error"}:
+        if time.time() - (_j.get("finished_at") or 0) < 6.0:
+            st.rerun(scope="app")
+
+_live_polling()
+
+_cur_slug = st.session_state.get("loaded_slug")   # cache — accédé plusieurs fois ci-dessous
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -3624,7 +3608,7 @@ with st.sidebar:
 
     # Checkbox suivi temps réel (toujours visible)
     auto_live = st.checkbox("🟢 Suivi en temps réel", value=True, key="auto_live_chk",
-                            help="Rafraîchit l'interface automatiquement pendant le scraping.")
+                            help="Rafraîchit automatiquement toutes les 2 s pendant le scraping (sans clic).")
     st.session_state["auto_live"] = auto_live
 
     st.markdown(
@@ -4557,8 +4541,7 @@ if _console_visible:
     with _ch2:
         if _job_running_now:
             _is_cross = _job_running_now and job.get("slug") != slug
-            _interval_label = "~4s" if _is_cross else "~1.5s"
-            st.caption(f"⚡ mise à jour toutes les {_interval_label}")
+            st.caption("⚡ mise à jour toutes les ~2 s")
     with _ch3:
         if st.button("🗑️ Effacer", key="clear_console", use_container_width=True):
             try: JOB_LOG_PATH.write_text("", "utf-8")
