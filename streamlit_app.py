@@ -46,7 +46,7 @@ from datetime import datetime
 # ═══════════════════════════════════════════════════════════════════════════
 STORE_CODE            = "1431"
 MAX_PAGES             = 15
-LECLERC_CACHE_TTL     = 12 * 3600
+LECLERC_CACHE_TTL     = 12 * 3600  # conservé pour compatibilité — plus utilisé (cache permanent)
 LECLERC_PAGE_SIZE     = 96
 VIVINO_SIMILARITY_MIN  = 0.28
 VIVINO_CANDIDATES_MAX  = 8
@@ -870,12 +870,12 @@ def _lec_path(slug): return CACHE_DIR / f"leclerc_{slug}.json"
 def _viv_path(slug="vins-rouges"): return CACHE_DIR / f"vivino_{slug}.json"
 
 def load_leclerc_cache(slug: str) -> dict | None:
+    """Retourne le cache Leclerc sans expiration — conservé jusqu'au prochain scrape manuel."""
     p = _lec_path(slug)
-    d = _read_json_cached(p, ttl=30.0)   # TTL long : le cache Leclerc évolue peu
+    d = _read_json_cached(p, ttl=30.0)
     if not isinstance(d, dict): return None
-    if time.time() - d.get("cached_at", 0) < LECLERC_CACHE_TTL:
-        return d
-    return None
+    if "wines" not in d: return None
+    return d
 
 def save_leclerc_cache(slug: str, wines: list) -> None:
     p, tmp = _lec_path(slug), _lec_path(slug).with_suffix(".tmp")
@@ -3227,13 +3227,13 @@ def _make_wines_df(ws: list) -> "pd.DataFrame":
     Fix I : fonction top-level (plus de redéfinition à chaque render dans tab_export).
     Colonnes communes pour tab_data ET tab_export — une seule source de vérité.
     """
-    return pd.DataFrame([{
+    df = pd.DataFrame([{
         "Nom":              w["name"],
-        "Région":           w.get("region", ""),
-        "Millésime":        w.get("vintage") or "",
+        "Région":           w.get("region") or "",
+        "Millésime":        w.get("vintage"),
         "Prix (€)":         w.get("price") or 0,
         "Volume (cl)":      w.get("volume_cl") or 75,
-        "Tendance":         w.get("price_trend", ""),
+        "Tendance":         w.get("price_trend") or "",
         "EAN":              w.get("ean") or "",
         "Note":             w.get("rating") or "",
         "Nb avis":          w.get("ratings_count") or "",
@@ -3247,13 +3247,22 @@ def _make_wines_df(ws: list) -> "pd.DataFrame":
         "Acidité":          w.get("acidity") or "",
         "Sucrosité":        w.get("sweetness") or "",
         "Corps":            w.get("body") or "",
-        "Mil. Vivino":      w.get("vivino_year") or "",
+        "Mil. Vivino":      w.get("vivino_year"),
         "Mil. OK":          _VINTAGE_MATCH_LABEL.get(w.get("vintage_match"), "—"),
         "Dispo":            "✅" if w.get("available", True) else "⛔",
         "Leclerc":          w.get("url") or "",
         "Vivino":           w.get("vivino_url") or "",
         "Query":            build_query(w["name"]),
     } for w in ws])
+    # Normaliser les colonnes à types mixtes (int/str/None) en str pur pour Arrow/PyArrow
+    for col in ("Millésime", "Mil. Vivino"):
+        if col in df.columns:
+            df[col] = df[col].apply(
+                lambda v: "" if v is None or (isinstance(v, float) and __import__("math").isnan(v))
+                          else str(int(v)) if isinstance(v, (int, float)) and v == int(v)
+                          else str(v) if v != "" else ""
+            )
+    return df
 
 _DF_COL_CONFIG = {
     "Leclerc":   st.column_config.LinkColumn(display_text="🛒"),
@@ -4327,15 +4336,16 @@ with tab_data:
         "Note":      v.get("rating") or "",
         "Nb avis":   v.get("ratings_count") or "",
         "Vivino":    v.get("vivino_url") or "",
-        "Millésime": v.get("vivino_year") or "",
+        "Millésime": str(int(v["vivino_year"])) if isinstance(v.get("vivino_year"), (int, float)) else (v.get("vivino_year") or ""),
         "Confiance": v.get("match_confidence") or "",
         "Type":      vivino_cache_type(v),
         "🔒":        "🔒" if v.get("locked") else "",
         "Màj":       fmt_age(v.get("cached_at",0)),
     } for k, v in vc_now.items()])
     st.dataframe(df_c, use_container_width=True, hide_index=True, height=400,
-        column_config={"Vivino":st.column_config.LinkColumn(display_text="🍷"),
-                       "Note":  st.column_config.NumberColumn(format="%.1f")})
+        column_config={"Vivino":    st.column_config.LinkColumn(display_text="🍷"),
+                       "Note":      st.column_config.NumberColumn(format="%.1f"),
+                       "Millésime": st.column_config.TextColumn()})
 
     st.divider()
     st.markdown('<div class="tab-section">🛠️ Correction manuelle</div>', unsafe_allow_html=True)
