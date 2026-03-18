@@ -46,11 +46,12 @@ from datetime import datetime
 # ═══════════════════════════════════════════════════════════════════════════
 STORE_CODE            = "1431"
 MAX_PAGES             = 15
+_VIVINO_API_WORKERS    = 8     # workers Phase 1 API parallèle
 LECLERC_CACHE_TTL     = 12 * 3600  # conservé pour compatibilité — plus utilisé (cache permanent)
 LECLERC_PAGE_SIZE     = 96
 VIVINO_SIMILARITY_MIN  = 0.28
 VIVINO_CANDIDATES_MAX  = 8
-VIVINO_API_TIMEOUT     = 8
+VIVINO_API_TIMEOUT     = 12   # augmenté : 8s trop court sur réseau lent
 VIVINO_CACHE_TTL_DAYS  = 30    # Entrées Vivino auto-marquées stale après N jours
 CARDS_PER_PAGE         = 24    # Nb de cartes affichées par page dans le classement
 
@@ -103,8 +104,11 @@ VIVINO_TYPE_IDS: dict[str, int] = {
 def _make_session() -> requests.Session:
     """Session HTTP avec retry automatique et connection pooling."""
     s = requests.Session()
-    retry = Retry(total=3, backoff_factor=0.4,
-                  status_forcelist=[429, 500, 502, 503, 504])
+    # 429 exclu de status_forcelist : le backoff global _vivino_429_until
+    # gère la congestion. Laisser Retry retenter le 429 en parallèle × 8
+    # threads aggraverait le throttling (24 requêtes supplémentaires).
+    retry = Retry(total=3, backoff_factor=0.5,
+                  status_forcelist=[500, 502, 503, 504])
     s.mount("https://", HTTPAdapter(max_retries=retry, pool_connections=8, pool_maxsize=16))
     s.headers.update(VIVINO_API_HEADERS)
     return s
@@ -794,12 +798,13 @@ def gist_pull_all() -> dict:
 
 _gist_push_last: dict[str, float] = {}   # filename → last push timestamp
 _gist_push_lock = threading.Lock()       # protection accès concurrent
-_GIST_PUSH_MIN_INTERVAL = 30.0           # seconds entre 2 push du même fichier
+_GIST_PUSH_MIN_INTERVAL = 5.0            # seconds entre 2 push du même fichier
 
 def _gist_push_async(filename: str, content: str, force: bool = False) -> None:
-    """Push non-bloquant throttlé : max 1 push par fichier toutes les 30s.
+    """Push non-bloquant throttlé : max 1 push par fichier toutes les 5s.
     Évite la saturation de threads lors des sauvegardes incrémentielles du scraping.
-    force=True : bypasse le throttle (fin de scraping, correction manuelle)."""
+    force=True : bypasse le throttle (fin de scraping, correction manuelle).
+    daemon=False : le thread survit un peu plus longtemps si Streamlit recycle."""
     if not _gist_is_configured():
         return
     now = time.time()
@@ -808,7 +813,7 @@ def _gist_push_async(filename: str, content: str, force: bool = False) -> None:
             return   # trop tôt — skip ce push
         _gist_push_last[filename] = now
     threading.Thread(
-        target=gist_push, args=(filename, content), daemon=True
+        target=gist_push, args=(filename, content), daemon=False
     ).start()
 
 
@@ -1563,10 +1568,17 @@ def _merge_vivino(wines: list, vc: dict, ph: dict | None = None) -> list:
     is_natural, acidity, tannin, sweetness, body, ratings_count_all
     """
     if ph is None: ph = {}
+    # Pré-calculer build_query 1× par vin (évite N appels répétés lors des reruns)
+    _bq_cache: dict[str, str] = {}
+    def _bq(name):
+        if name not in _bq_cache:
+            _bq_cache[name] = build_query(name)
+        return _bq_cache[name]
+
     result = []
     for w in wines:
         w = dict(w)
-        key = build_query(w["name"])
+        key = _bq(w["name"])
         cv  = vc.get(key, {})
         w.setdefault("available", True)
         if cv.get("suppressed"):
@@ -2122,6 +2134,13 @@ def choose_best_vivino_candidate(
     _rejected    = rejected_urls or set()
     _grapes_hint = {_norm_ascii(g) for g in (grapes_hint or [])}
 
+    # Pré-calculer les représentations de la query 1× (réutilisées sur chaque candidat)
+    _q_words  = _norm_words(query)
+    _q_ascii  = _NONALPHA_RE.sub("", _norm_ascii(query))
+    _q_bg     = {_q_ascii[i:i+2] for i in range(len(_q_ascii)-1)} if len(_q_ascii) > 1 else set()
+    _q_key    = max(_q_words, key=len, default="")
+    _q_ordered= [w for w in _WORDS3_RE.findall(_norm_ascii(query)) if w not in _NAME_PREFIX_STOP]
+
     for c in candidates:
         # Ignorer les candidats dont l'URL a déjà été rejetée
         c_url = c.get("url") or (
@@ -2132,10 +2151,32 @@ def choose_best_vivino_candidate(
         if c_url and c_url in _rejected:
             continue
 
-        score = _name_similarity(query, c.get("title", ""))
+        # ── Similarité nom (utilise les pré-calculs query) ─────────────────
+        c_title = c.get("title", "")
+        c_words = _norm_words(c_title)
+        if not c_words:
+            continue
+        inter = len(_q_words & c_words)
+        union = len(_q_words | c_words)
+        jaccard = inter / union if union else 0.0
+        c_ascii = _NONALPHA_RE.sub("", _norm_ascii(c_title))
+        c_bg    = {c_ascii[i:i+2] for i in range(len(c_ascii)-1)} if len(c_ascii) > 1 else set()
+        bg_union = _q_bg | c_bg
+        bg_score = len(_q_bg & c_bg) / len(bg_union) if bg_union else 0.0
+        producer_bonus = 0.10 if _q_key and len(_q_key) >= 5 and _q_key in c_words else 0.0
+        exclusive_vivino = c_words - _q_words
+        extra_penalty = min(0.20, len({w for w in exclusive_vivino if len(w) >= 5}) * 0.08)
+        first_word_penalty = 0.0
+        if _q_ordered:
+            first_sig = _q_ordered[0]
+            if len(first_sig) >= 4 and first_sig not in c_words:
+                first_word_penalty = 0.15
+        score = round(min(1.0, max(0.0,
+            jaccard * 0.7 + bg_score * 0.3 + producer_bonus - extra_penalty - first_word_penalty
+        )), 4)
 
         # ── Boost appellation ──────────────────────────────────────────────
-        if region_norm and region_norm in _norm_ascii(c.get("title", "")):
+        if region_norm and region_norm in _norm_ascii(c_title):
             score += 0.30
 
         # ── Millésime ─────────────────────────────────────────────────────
@@ -2147,36 +2188,27 @@ def choose_best_vivino_candidate(
         elif vintage and not c_year:
             score -= 0.03
 
-        # ── Boost cépages (nouveau) ────────────────────────────────────────
-        # Si le nom Leclerc contient des cépages, vérifier s'ils matchent
-        # les cépages retournés par l'API Vivino pour ce candidat
+        # ── Boost cépages ──────────────────────────────────────────────────
         if _grapes_hint and c.get("record"):
             wine_obj   = (c["record"].get("vintage") or {}).get("wine") or {}
             style      = wine_obj.get("style") or {}
             viv_grapes = {_norm_ascii(g.get("name","")) for g in (style.get("grapes") or [])}
             if viv_grapes:
                 common = _grapes_hint & viv_grapes
-                grape_boost = min(0.20, len(common) * 0.08)
-                score += grape_boost
-                # Pénalité si aucun cépage en commun alors qu'on en attendait
+                score += min(0.20, len(common) * 0.08)
                 if not common and len(_grapes_hint) >= 2:
                     score -= 0.08
 
-        # ── Pénalité type incohérent (nouveau) ────────────────────────────
-        # Si Vivino retourne un vin d'une couleur différente du slug Leclerc
+        # ── Pénalité type incohérent ────────────────────────────────────────
         if c.get("record"):
-            wine_obj   = (c["record"].get("vintage") or {}).get("wine") or {}
-            viv_type   = wine_obj.get("type_id")
+            wine_obj = (c["record"].get("vintage") or {}).get("wine") or {}
+            viv_type = wine_obj.get("type_id")
             if viv_type:
                 expected_slug = _VIVINO_TYPE_TO_SLUG.get(viv_type, "")
                 if expected_slug and expected_slug != slug:
-                    score -= 0.75  # pénalité forte : rouge vs blanc/rosé
-                    # FIX : -0.40 puis -0.60 insuffisants car les couleurs (blanc/rosé)
-                    # sont dans STOP → titre Vivino perd son signal → score de base = 1.0
-                    # -0.75 garantit le rejet (1.0 - 0.75 = 0.25 < seuil 0.28)
+                    score -= 0.75
 
-        # ── Boost région Vivino exacte (nouveau) ──────────────────────────
-        # wine.region.name est plus précis que notre extract_region
+        # ── Boost région Vivino exacte ──────────────────────────────────────
         if region_norm and c.get("record"):
             wine_obj   = (c["record"].get("vintage") or {}).get("wine") or {}
             viv_region = _norm_ascii((wine_obj.get("region") or {}).get("name") or "")
@@ -2188,13 +2220,8 @@ def choose_best_vivino_candidate(
 
     if not best or best_score < VIVINO_SIMILARITY_MIN:
         return None, best_score
-    # Seuil dynamique : query mono-mot = appellation générique → exige 0.70
-    # Un nom comme "Pomerol" ou "Bordeaux" seul matcherait n'importe quel vin.
-    # En revanche un nom propre court ("Yquem", "Opus", "Gevrey") est très spécifique
-    # → seuil normal 0.28.
-    # Distinction : le mot unique est-il dans _GENERIC_APPELLATIONS ?
-    query_sig_words = _norm_words(query)
-    if len(query_sig_words) <= 1:
+    # Seuil dynamique : query mono-mot appellation générique → exige 0.70
+    if len(_q_words) <= 1:
         single_word = _norm_ascii(query).strip()
         if single_word in _GENERIC_APPELLATIONS and best_score < 0.70:
             return None, best_score
@@ -2282,12 +2309,38 @@ def fetch_vivino_via_api(query: str, vintage, slug: str = "vins-rouges",
         )
         if resp.status_code == 429:
             delay = _vivino_set_backoff(resp.headers.get("Retry-After", ""))
-            time.sleep(delay)   # attendre directement dans cet appel aussi
+            time.sleep(delay)
             return None
         if resp.status_code != 200:
+            # Loguer le premier échec pour diagnostiquer (1 fois par query, pas à chaque retry)
+            import logging as _log
+            ct = resp.headers.get("Content-Type", "?")
+            _log.warning(
+                f"[Vivino API] HTTP {resp.status_code} pour {query!r} "
+                f"| Content-Type: {ct} "
+                f"| Body: {resp.text[:120]!r}"
+            )
             return None
 
-        records = (resp.json().get("explore_vintage", {}) or {}).get("records", [])
+        # Vérifier que la réponse est bien du JSON (anti-scraping renvoie parfois du HTML)
+        ct = resp.headers.get("Content-Type", "")
+        if "json" not in ct:
+            import logging as _log
+            _log.warning(
+                f"[Vivino API] Réponse non-JSON pour {query!r} "
+                f"| Content-Type: {ct} | Body: {resp.text[:120]!r}"
+            )
+            return None
+
+        data = resp.json()
+        records = (data.get("explore_vintage", {}) or {}).get("records", [])
+        # Si la clé explore_vintage est absente, loguer la structure pour déboguer
+        if "explore_vintage" not in data:
+            import logging as _log
+            _log.warning(
+                f"[Vivino API] Clé explore_vintage absente pour {query!r} "
+                f"| Clés top-level: {list(data.keys())[:8]}"
+            )
         candidates = []
         for r in records[:VIVINO_CANDIDATES_MAX]:
             vintage_obj = r.get("vintage", {}) or {}
@@ -2476,90 +2529,83 @@ def _set_store_cookie(driver) -> None:
         pass   # non-bloquant : l'app fonctionne même sans cookie
 
 
-def scrape_leclerc_full(slug: str, log=None) -> list:
+
+def _scrape_all_leclerc_pages(driver, slug: str, log=None) -> list:
+    """
+    Itère toutes les pages Leclerc et retourne la liste brute de toutes les cartes.
+    Facteur commun de scrape_leclerc_full, check_availability, repair_zero_prices.
+
+    Gestion du timing :
+    - WebDriverWait jusqu'à ce que les cartes soient présentes (rapide si le site charge vite)
+    - sleep court (0.8s) après wait réussi, sleep plus long (2.5s) si wait échoué
+    """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
+    _CARD_CSS = "app-product-card"
+    all_cards, seen_keys = [], set()
+    nb_pages = 1
+    for p in range(1, MAX_PAGES + 1):
+        if log: log(f"  📄 Page {p}/{nb_pages}…")
+        driver.get(leclerc_url(slug, p))
+        waited = False
+        try:
+            WebDriverWait(driver, 18).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, _CARD_CSS)))
+            waited = True
+        except Exception:
+            pass
+        time.sleep(0.8 if waited else 2.5)   # court si déjà chargé, long sinon
+        html = driver.page_source
+        if p == 1:
+            cards, nb_pages = parse_page(html)
+            nb_pages = min(nb_pages, MAX_PAGES)
+        else:
+            cards = parse_cards(html)
+        if not cards:
+            if log: log(f"  ⚠️ Page {p} vide — arrêt")
+            break
+        new = []
+        for c in cards:
+            k = c.get("ean") or c.get("name")
+            if k and k not in seen_keys:
+                seen_keys.add(k)
+                new.append(c)
+        all_cards.extend(new)
+        if log: log(f"  ✅ Page {p} : +{len(new)} cartes (total {len(all_cards)})")
+        if p >= nb_pages:
+            break
+    return all_cards
 
-    wines, seen = [], set()
-    # ③ CORRIGÉ : initialisation à None pour éviter NameError dans finally
+def scrape_leclerc_full(slug: str, log=None) -> list:
+    """Scrape complet Leclerc via _scrape_all_leclerc_pages."""
     driver = None
     try:
         driver = make_driver()
-        _set_store_cookie(driver)   # injecter le magasin avant de scraper
-        url1 = leclerc_url(slug, 1)
-        if log: log(f"🌐 Chargement {url1}…")
-        driver.get(url1)
-        try: WebDriverWait(driver, 25).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card")))
-        except Exception: pass
-        time.sleep(3)
-        html      = driver.page_source
-        p1_wines, nb = parse_page(html)
-        nb = min(nb, MAX_PAGES)
-        for w in p1_wines:
-            # Bug 1 fix : ean='' n'est pas un identifiant unique — on déduplique
-            # sur (ean or name) pour éviter que tous les vins sans EAN soient écrasés
-            key = w["ean"] or w["name"]
-            if key not in seen:
-                seen.add(key)
-                wines.append(w)
-        if log: log(f"✅ Page 1 : {len(wines)} vins — {nb} page(s)")
-        for p in range(2, nb + 1):
-            if log: log(f"🌐 Page {p}/{nb}…")
-            driver.get(leclerc_url(slug, p))
-            try: WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card")))
-            except Exception: pass
-            time.sleep(2)
-            new = [w for w in parse_cards(driver.page_source)
-                   if (w["ean"] or w["name"]) not in seen]
-            if not new: break
-            for w in new: seen.add(w["ean"] or w["name"])
-            wines.extend(new)
-            if log: log(f"✅ Page {p} : +{len(new)} (total {len(wines)})")
+        _set_store_cookie(driver)
+        if log: log(f"🌐 Scrape complet Leclerc ({slug})…")
+        wines = _scrape_all_leclerc_pages(driver, slug, log)
     finally:
-        # ③ CORRIGÉ : vérification driver is not None avant quit()
         if driver is not None:
             try: driver.quit()
             except Exception: pass
+    if log: log(f"✅ {len(wines)} vins récupérés")
     update_price_history(wines)
     return wines
 
 
 def check_availability(slug: str, cached_wines: list, log=None) -> list:
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-
-    current_eans = set()
+    """
+    Vérifie stock + met à jour les prix depuis les données fraîches du site.
+    Utilise _scrape_all_leclerc_pages pour itérer toutes les pages.
+    """
     driver = None
-    nb_pages = 1
+    fresh_cards: list[dict] = []
     try:
         driver = make_driver()
-        _set_store_cookie(driver)   # injecter le magasin avant de scraper
-        for p in range(1, MAX_PAGES + 1):
-            if log: log(f"🌐 Vérif. stock page {p}/{nb_pages}…")
-            driver.get(leclerc_url(slug, p))
-            try: WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card")))
-            except Exception: pass
-            time.sleep(1.5)
-            page_src = driver.page_source
-            # Fix 11b : page 1 → parse_page() récupère cartes + nb_pages en un seul BS parse
-            if p == 1:
-                page_w, _nb = parse_page(page_src)
-                nb_pages = min(_nb, MAX_PAGES)
-            else:
-                page_w = parse_cards(page_src)
-            if not page_w:
-                if log: log(f"⚠️ Page {p} vide — arrêt du scraping stock")
-                break
-            # Bug 2 fix : on n'ajoute pas les EAN vides — '' in current_eans
-            # marquerait TOUS les vins sans EAN comme disponibles à tort
-            current_eans.update(w["ean"] for w in page_w if w.get("ean"))
-            if log: log(f"  ✅ Page {p} : {len(page_w)} vins ({len(current_eans)} EAN collectés)")
-            if p >= nb_pages: break
+        _set_store_cookie(driver)
+        if log: log(f"🌐 Vérification stock + prix ({slug})…")
+        fresh_cards = _scrape_all_leclerc_pages(driver, slug, log)
     except Exception as e:
         if log: log(f"⚠️ Vérif. stock échouée : {e}")
     finally:
@@ -2567,24 +2613,32 @@ def check_availability(slug: str, cached_wines: list, log=None) -> list:
             try: driver.quit()
             except Exception: pass
 
+    # Indexer par EAN et par nom pour mise à jour disponibilité + prix
+    current_eans: set[str]        = {c["ean"] for c in fresh_cards if c.get("ean")}
+    fresh_by_ean: dict[str, dict] = {c["ean"]: c for c in fresh_cards if c.get("ean")}
+    fresh_by_name: dict[str, dict]= {c["name"]: c for c in fresh_cards}
+
     if not current_eans:
-        if log: log("⚠️ Aucun EAN récupéré — site Leclerc inaccessible ? Disponibilité non mise à jour.")
+        if log: log("⚠️ Aucun EAN récupéré — site inaccessible ? Disponibilité non mise à jour.")
         return cached_wines
 
-    # Bug 2 fix : les vins sans EAN conservent leur statut précédent
-    # (on ne peut pas savoir s'ils sont en rayon sans EAN pour les identifier)
-    result = []
+    result, n_price_updated = [], 0
     for w in cached_wines:
         w2 = dict(w)
         if w2.get("ean"):
             w2["available"] = w2["ean"] in current_eans
-        # else: w2["available"] inchangé — statut précédent conservé
+            fresh = fresh_by_ean.get(w2["ean"]) or fresh_by_name.get(w2["name"])
+        else:
+            fresh = fresh_by_name.get(w2["name"])
+        if fresh and fresh.get("price") and fresh["price"] > 0 and fresh["price"] != w2.get("price"):
+            w2["price"] = fresh["price"]
+            n_price_updated += 1
         result.append(w2)
+
     update_price_history(result)
     nok = sum(1 for w in result if w.get("available"))
-    if log: log(f"✅ {nok} dispo, {len(result)-nok} indispo à Blagnac")
+    if log: log(f"✅ {nok} dispo · {len(result)-nok} indispo · {n_price_updated} prix mis à jour")
     return result
-
 
 def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", region: str = "") -> dict:
     """
@@ -2624,12 +2678,15 @@ def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", reg
         try:
             driver.get(f"https://www.vivino.com/search/wines"
                        f"?q={requests.utils.quote(q)}&language=fr")
-            try: WebDriverWait(driver, 9).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR,
-                     "[class*='wineCard'],[class*='wine-card'],[class*='averageValue'],[href*='/w/']")))
+            _sel_waited = False
+            try:
+                WebDriverWait(driver, 9).until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR,
+                         "[class*='wineCard'],[class*='wine-card'],[class*='averageValue'],[href*='/w/']")))
+                _sel_waited = True
             except Exception: pass
-            time.sleep(1)
+            time.sleep(0.5 if _sel_waited else 1.5)
             cands = vivino_candidates_from_search(driver.page_source)
             return choose_best_vivino_candidate(query, vintage, cands, region=region,
                                                 grapes_hint=_gh, slug=slug)
@@ -2660,11 +2717,14 @@ def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", reg
 
     try:
         driver.get(wine_url)
-        try: WebDriverWait(driver, 9).until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "script[type='application/ld+json']")))
+        _wine_waited = False
+        try:
+            WebDriverWait(driver, 9).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "script[type='application/ld+json']")))
+            _wine_waited = True
         except Exception: pass
-        time.sleep(1)
+        time.sleep(0.5 if _wine_waited else 1.5)
         d = parse_wine_jsonld(driver.page_source)
     except Exception:
         return EMPTY
@@ -2794,9 +2854,30 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
         log(f"  ⚠️ {n_skip_hard} vins skippés (trop de rejets précédents)")
 
     # ── PHASE 1 : API parallèle ────────────────────────────────────────────
+    # Sonde rapide : tester l'API sur 1 vin avant de lancer tous les workers.
+    # Permet de détecter immédiatement un blocage (403, HTML, structure changée).
+    if log:
+        log(f"⚡ Phase 1 : test API Vivino…")
+        try:
+            _probe_resp = _SESSION.get(
+                "https://www.vivino.com/api/explore/explore",
+                params={"language": "fr", "q": to_process[0]["name"][:30],
+                        "wine_type_ids[]": VIVINO_TYPE_IDS.get(slug, 1),
+                        "order_by": "match"},
+                timeout=VIVINO_API_TIMEOUT,
+            )
+            _ct = _probe_resp.headers.get("Content-Type", "?")
+            _st = _probe_resp.status_code
+            if _st == 200 and "json" in _ct:
+                _keys = list((_probe_resp.json() or {}).keys())[:5]
+                log(f"  ℹ️ API Vivino → 200 JSON · clés: {_keys}")
+            else:
+                log(f"  ⚠️ API Vivino → HTTP {_st} · Content-Type: {_ct} · Body: {_probe_resp.text[:80]!r}")
+        except Exception as _pe:
+            log(f"  ⚠️ API Vivino inaccessible : {_pe}")
     if log: log(f"⚡ Phase 1 : appels API parallèles pour {len(to_process)} vins…")
     api_results: dict[str, tuple[str, dict | None]] = {}   # key → (region, result)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_VIVINO_API_WORKERS) as pool:
         futures = {pool.submit(_api_lookup_wine, w, slug, _rejections): w for w in to_process}
         for fut in concurrent.futures.as_completed(futures):
             try:
@@ -2818,8 +2899,11 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
             ckpt_tick(slug, ean)
             done_count += 1
             found += bool(res.get("rating"))
-            if log and res.get("rating"):
-                log(f"  ⚡ [{done_count}/{len(wines)}] {w['name'][:40]} ★ {res['rating']} · {fmt_count(res.get('ratings_count'))}")
+            if log:
+                if res.get("rating"):
+                    log(f"  ⚡ [{done_count}/{len(wines)}] {w['name'][:40]} ★ {res['rating']} · {fmt_count(res.get('ratings_count'))}")
+                elif res.get("vivino_url"):
+                    log(f"  🔗 [{done_count}/{len(wines)}] {w['name'][:40]} (URL, conf {conf:.2f})")
             # Sauvegarde incrémentale tous les 10 résultats → le polling temps réel
             # voit les nouvelles notes au fur et à mesure (pas seulement à la fin)
             if done_count % 10 == 0:
@@ -2852,8 +2936,9 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
                 found += 1
                 if log: log(f"  ✅ [{done_count}/{len(wines)}] {wine['name'][:38]}\n"
                             f"     ★ {vd['rating']} · {fmt_count(vd.get('ratings_count'))} avis")
-                # Sauvegarde immédiate après chaque note trouvée → visible au prochain rerun
-                save_vivino_cache(vc, slug)
+                # Sauvegarde par batch de 5 notes → réduit I/O sans perdre de données
+                if found % 5 == 0:
+                    save_vivino_cache(vc, slug)
             else:
                 if log:
                     log(f"  🔍 [{done_count}/{len(wines)}] {wine['name'][:45]} — aucune note")
@@ -2882,10 +2967,6 @@ def repair_zero_prices(slug: str, log=None) -> int:
     Utilise Selenium avec cookie magasin pour récupérer les vrais prix.
     Retourne le nombre de vins corrigés.
     """
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-
     lc = load_leclerc_cache(slug)
     if not lc:
         if log: log("❌ Pas de cache Leclerc.")
@@ -2902,31 +2983,9 @@ def repair_zero_prices(slug: str, log=None) -> int:
     try:
         driver = make_driver()
         _set_store_cookie(driver)
-
-        # Rescraper toutes les pages et patcher les prix manquants par EAN
-        nb_pages = 1
-        fresh_by_ean: dict[str, float] = {}
-        fresh_by_name: dict[str, float] = {}
-        for p in range(1, MAX_PAGES + 1):
-            driver.get(leclerc_url(slug, p))
-            try:
-                WebDriverWait(driver, 20).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "app-product-card")))
-            except Exception: pass
-            time.sleep(3)
-            html = driver.page_source
-            if p == 1:
-                _cards, _nb = parse_page(html)
-                nb_pages = min(_nb, MAX_PAGES)
-            else:
-                _cards = parse_cards(html)
-            for card_w in _cards:
-                if card_w.get("price") and card_w["price"] > 0:
-                    if card_w.get("ean"):
-                        fresh_by_ean[card_w["ean"]] = card_w["price"]
-                    fresh_by_name[card_w["name"]] = card_w["price"]
-            if p >= nb_pages:
-                break
+        fresh_cards = _scrape_all_leclerc_pages(driver, slug, log)
+        fresh_by_ean  = {c["ean"]:  c["price"] for c in fresh_cards if c.get("ean") and c.get("price") and c["price"] > 0}
+        fresh_by_name = {c["name"]: c["price"] for c in fresh_cards if c.get("price") and c["price"] > 0}
 
         # Patcher les vins avec prix=0
         wines = [dict(w) for w in lc["wines"]]
@@ -3384,6 +3443,37 @@ if _restore_msg and not st.session_state.get("_gist_restore_toasted"):
     st.session_state["_gist_restore_toasted"] = True
     st.toast(_restore_msg, icon="💾")
 
+# ── SYNC DE DÉMARRAGE ─────────────────────────────────────────────────────
+# Pousse les fichiers Vivino locaux vers le Gist au démarrage de chaque
+# instance serveur (1× via cache_resource). Garantit que le Gist est à jour
+# même si des pushes précédents ont été interrompus (daemon threads tués).
+@st.cache_resource
+def _startup_gist_sync():
+    """Synchronise les fichiers Vivino locaux → Gist au démarrage de l'instance."""
+    if not _gist_is_configured():
+        return
+    _SLUGS = ["vins-rouges", "vins-blancs", "vins-roses", "vins-mousseux-et-petillants"]
+    for slug in _SLUGS:
+        for _path_fn in (_viv_path, _lec_path):
+            p = _path_fn(slug)
+            if p.exists():
+                try:
+                    content = p.read_text("utf-8")
+                    parsed  = json.loads(content)
+                    # Vivino = dict, Leclerc = {"wines": [...]}
+                    ok = (isinstance(parsed, dict)
+                          and (len(parsed) > 0 if _path_fn is _viv_path
+                               else len(parsed.get("wines", [])) > 0))
+                    if ok:
+                        # non-daemon : survit un peu plus longtemps au recyclage Streamlit
+                        threading.Thread(
+                            target=gist_push, args=(p.name, content), daemon=False
+                        ).start()
+                except Exception:
+                    pass
+
+_startup_gist_sync()
+
 # ── REFRESH ANTICIPÉ ──────────────────────────────────────────────────────
 # Charger les données fraîches AVANT tout rendu (sidebar + onglets).
 # Sans ça, st.rerun() redémarre le script mais wines est relu depuis
@@ -3414,10 +3504,35 @@ if _early_job.get("status") in {"running", "queued"}:
 # déclenche un rerun complet de l'app (scope="app") pour rafraîchir toute l'UI.
 @st.fragment(run_every=2)
 def _live_polling():
+    _now = time.time()
+
+    # ── Backup Gist périodique (toutes les heures) ────────────────────────
+    # Indépendant du scraping — garantit que le Gist reste à jour même si
+    # l'utilisateur n'a pas scrapé depuis plusieurs heures/jours.
+    # session_state["_gist_hourly_backup"] repart à 0 à chaque restart →
+    # le premier poll après un redémarrage pousse immédiatement.
+    if (_gist_is_configured()
+            and _now - st.session_state.get("_gist_hourly_backup", 0.0) > 3600):
+        st.session_state["_gist_hourly_backup"] = _now
+        for _bslug in ["vins-rouges", "vins-blancs", "vins-roses",
+                        "vins-mousseux-et-petillants"]:
+            for _bpath_fn, _bcheck in ((_viv_path, lambda d: isinstance(d, dict) and len(d) > 0),
+                                        (_lec_path, lambda d: isinstance(d, dict) and len(d.get("wines", [])) > 0)):
+                _bp = _bpath_fn(_bslug)
+                if _bp.exists():
+                    try:
+                        _bc = _bp.read_text("utf-8")
+                        _bd = json.loads(_bc)
+                        if _bcheck(_bd):
+                            threading.Thread(
+                                target=gist_push, args=(_bp.name, _bc), daemon=False
+                            ).start()
+                    except Exception:
+                        pass
+
     if not st.session_state.get("auto_live", True):
         return
     # Cooldown : ne pas déclencher deux reruns complets en moins de 1.8s
-    _now = time.time()
     if _now - st.session_state.get("_last_full_rerun", 0.0) < 1.8:
         return
     _j = load_job_state()
