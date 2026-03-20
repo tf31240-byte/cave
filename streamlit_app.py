@@ -162,6 +162,19 @@ def _vivino_set_backoff(retry_after_hdr: str = "") -> float:
         _vivino_429_until = time.time() + delay
     return delay
 
+# ── Supprimer les warnings ScriptRunContext des threads background ────────
+# Ces warnings sont émis par Streamlit à chaque appel de log depuis un thread
+# non-principal (gist_push, _background_job…). Ils sont informatifs mais
+# inondent les logs — on les filtre avec un logging.Filter.
+import logging as _logging
+class _NoScriptRunContext(_logging.Filter):
+    def filter(self, record):
+        return "ScriptRunContext" not in (record.getMessage())
+for _h in _logging.getLogger().handlers:
+    _h.addFilter(_NoScriptRunContext())
+# Appliquer aussi au logger streamlit
+_logging.getLogger("streamlit").addFilter(_NoScriptRunContext())
+
 st.set_page_config(
     page_title="Cave Leclerc Blagnac × Vivino",
     page_icon="🍷",
@@ -819,7 +832,7 @@ def gist_pull_all() -> dict:
 
 _gist_push_last: dict[str, float] = {}   # filename → last push timestamp
 _gist_push_lock = threading.Lock()       # protection accès concurrent
-_GIST_PUSH_MIN_INTERVAL = 5.0            # seconds entre 2 push du même fichier
+_GIST_PUSH_MIN_INTERVAL = 60.0           # 1 push/min max par fichier (throttle scraping)
 
 def _gist_push_async(filename: str, content: str, force: bool = False) -> None:
     """Push non-bloquant throttlé : max 1 push par fichier toutes les 5s.
@@ -3033,7 +3046,7 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
                     found += 1
                     if log: log(f"  ✅ [{done_count}/{len(wines)}] {wine['name'][:38]}\n"
                                 f"     ★ {vd['rating']} · {fmt_count(vd.get('ratings_count'))} avis")
-                    if found % 5 == 0:
+                    if found % 20 == 0:
                         save_vivino_cache(vc, slug)
                 elif _new_has:
                     if log: log(f"  🔗 [{done_count}/{len(wines)}] {wine['name'][:38]} — URL trouvée")
