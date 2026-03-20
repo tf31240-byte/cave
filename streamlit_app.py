@@ -3320,50 +3320,60 @@ def _make_wines_df(ws: list) -> "pd.DataFrame":
     Fix I : fonction top-level (plus de redéfinition à chaque render dans tab_export).
     Colonnes communes pour tab_data ET tab_export — une seule source de vérité.
     """
+    def _num(v):
+        """None si absent/zéro-équivoque, sinon float. Arrow gère None en float64 nullable."""
+        return float(v) if v is not None and v != "" and v is not False else None
+
+    def _year(v):
+        """Millésime → str '2021' ou '' — colonne TextColumn dans le config."""
+        import math
+        if v is None or (isinstance(v, float) and math.isnan(v)): return ""
+        try: return str(int(v))
+        except (ValueError, TypeError): return str(v) if v != "" else ""
+
     df = pd.DataFrame([{
         "Nom":              w["name"],
         "Région":           w.get("region") or "",
-        "Millésime":        w.get("vintage"),
-        "Prix (€)":         w.get("price") or 0,
-        "Volume (cl)":      w.get("volume_cl") or 75,
+        "Millésime":        _year(w.get("vintage")),
+        "Prix (€)":         _num(w.get("price")),
+        "Volume (cl)":      _num(w.get("volume_cl") or 75),
         "Tendance":         w.get("price_trend") or "",
         "EAN":              w.get("ean") or "",
-        "Note":             w.get("rating") or "",
-        "Nb avis":          w.get("ratings_count") or "",
-        "Nb avis (total)":  w.get("ratings_count_all") or "",
-        "Score":            w.get("score") or "",
+        "Note":             _num(w.get("rating")),
+        "Nb avis":          _num(w.get("ratings_count")),
+        "Nb avis (total)":  _num(w.get("ratings_count_all")),
+        "Score":            _num(w.get("score")),
         "Cépages":          ", ".join(w.get("grapes") or []),
         "Style":            w.get("style_name") or "",
         "Domaine":          w.get("winery") or "",
         "Naturel":          "🌿" if w.get("is_natural") else "",
-        "Tanin":            w.get("tannin") or "",
-        "Acidité":          w.get("acidity") or "",
-        "Sucrosité":        w.get("sweetness") or "",
-        "Corps":            w.get("body") or "",
-        "Mil. Vivino":      w.get("vivino_year"),
+        "Tanin":            _num(w.get("tannin")),
+        "Acidité":          _num(w.get("acidity")),
+        "Sucrosité":        _num(w.get("sweetness")),
+        "Corps":            _num(w.get("body")),
+        "Mil. Vivino":      _year(w.get("vivino_year")),
         "Mil. OK":          _VINTAGE_MATCH_LABEL.get(w.get("vintage_match"), "—"),
         "Dispo":            "✅" if w.get("available", True) else "⛔",
         "Leclerc":          w.get("url") or "",
         "Vivino":           w.get("vivino_url") or "",
         "Query":            build_query(w["name"]),
     } for w in ws])
-    # Normaliser les colonnes à types mixtes (int/str/None) en str pur pour Arrow/PyArrow
-    for col in ("Millésime", "Mil. Vivino"):
-        if col in df.columns:
-            df[col] = df[col].apply(
-                lambda v: "" if v is None or (isinstance(v, float) and __import__("math").isnan(v))
-                          else str(int(v)) if isinstance(v, (int, float)) and v == int(v)
-                          else str(v) if v != "" else ""
-            )
     return df
 
 _DF_COL_CONFIG = {
-    "Leclerc":   st.column_config.LinkColumn(display_text="🛒"),
-    "Vivino":    st.column_config.LinkColumn(display_text="🍷"),
-    "Prix (€)":  st.column_config.NumberColumn(format="%.2f"),
-    "Note":      st.column_config.NumberColumn(format="%.1f"),
-    "Score":     st.column_config.NumberColumn(format="%.2f"),
-    "Millésime": st.column_config.TextColumn(),   # évite la conversion int64 sur chaînes vides
+    "Leclerc":        st.column_config.LinkColumn(display_text="🛒"),
+    "Vivino":         st.column_config.LinkColumn(display_text="🍷"),
+    "Prix (€)":       st.column_config.NumberColumn(format="%.2f"),
+    "Note":           st.column_config.NumberColumn(format="%.1f"),
+    "Score":          st.column_config.NumberColumn(format="%.2f"),
+    "Nb avis":        st.column_config.NumberColumn(format="%d"),
+    "Nb avis (total)":st.column_config.NumberColumn(format="%d"),
+    "Tanin":          st.column_config.NumberColumn(format="%.2f"),
+    "Acidité":        st.column_config.NumberColumn(format="%.2f"),
+    "Sucrosité":      st.column_config.NumberColumn(format="%.2f"),
+    "Corps":          st.column_config.NumberColumn(format="%.2f"),
+    "Millésime":      st.column_config.TextColumn(),
+    "Mil. Vivino":    st.column_config.TextColumn(),
 }
 
 def _make_logger(max_lines: int = 10):
