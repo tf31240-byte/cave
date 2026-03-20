@@ -46,7 +46,7 @@ from datetime import datetime
 # ═══════════════════════════════════════════════════════════════════════════
 STORE_CODE            = "1431"
 MAX_PAGES             = 15
-_VIVINO_API_WORKERS    = 8     # workers Phase 1 API parallèle
+_VIVINO_API_WORKERS    = 4     # conservé pour compatibilité (Phase 1 désactivée)
 LECLERC_CACHE_TTL     = 12 * 3600  # conservé pour compatibilité — plus utilisé (cache permanent)
 LECLERC_PAGE_SIZE     = 96
 VIVINO_SIMILARITY_MIN  = 0.45   # relevé : 0.28 acceptait les faux-positifs API non triés
@@ -115,9 +115,29 @@ def _make_session() -> requests.Session:
 
 _SESSION = _make_session()
 
-# ── Backoff 429 Vivino (partagé entre tous les threads Phase 1) ──────────────
+# ── Backoff 429/403 Vivino (partagé entre tous les threads Phase 1) ─────────
 _vivino_429_until: float = 0.0
 _vivino_429_lock  = __import__("threading").Lock()
+_vivino_403_count: int   = 0    # nombre de 403 depuis le début de cette session API
+_vivino_403_lock  = __import__("threading").Lock()
+_VIVINO_403_ABORT = 10          # abandonner Phase 1 si ≥ N 403 consécutifs
+
+def _vivino_inc_403() -> int:
+    """Incrémente le compteur 403. Retourne la nouvelle valeur."""
+    global _vivino_403_count
+    with _vivino_403_lock:
+        _vivino_403_count += 1
+        return _vivino_403_count
+
+def _vivino_reset_403() -> None:
+    global _vivino_403_count
+    with _vivino_403_lock:
+        _vivino_403_count = 0
+
+def _vivino_is_blocked() -> bool:
+    """True si l'IP est probablement bloquée (trop de 403)."""
+    with _vivino_403_lock:
+        return _vivino_403_count >= _VIVINO_403_ABORT
 
 def _vivino_wait_if_throttled() -> None:
     """Attend si Vivino a retourné 429 récemment."""
@@ -862,7 +882,14 @@ def restore_from_gist() -> int:
             continue
         target = CACHE_DIR / fname
         try:
-            json.loads(file_content)
+            parsed = json.loads(file_content)
+            # Ne pas écraser avec un fichier vide depuis le Gist
+            is_vivino  = fname.startswith("vivino_")
+            is_leclerc = fname.startswith("leclerc_")
+            if is_vivino and (not isinstance(parsed, dict) or len(parsed) == 0):
+                continue
+            if is_leclerc and (not isinstance(parsed, dict) or len(parsed.get("wines",[])) == 0):
+                continue
             target.write_text(file_content, "utf-8")
             _invalidate_mem_cache(target)
             restored += 1
@@ -2311,8 +2338,14 @@ def fetch_vivino_via_api(query: str, vintage, slug: str = "vins-rouges",
             delay = _vivino_set_backoff(resp.headers.get("Retry-After", ""))
             time.sleep(delay)
             return None
+        if resp.status_code == 403:
+            # IP bloquée — incrémenter compteur global, ne pas faire de fallbacks
+            n403 = _vivino_inc_403()
+            if n403 == 1:   # loguer une seule fois
+                import logging as _log
+                _log.warning(f"[Vivino API] HTTP 403 pour {query!r} — IP bloquée ({n403})")
+            return None
         if resp.status_code != 200:
-            # Loguer le premier échec pour diagnostiquer (1 fois par query, pas à chaque retry)
             import logging as _log
             ct = resp.headers.get("Content-Type", "?")
             _log.warning(
@@ -2793,9 +2826,14 @@ def _api_lookup_wine(wine: dict, slug: str,
     key    = build_query(wine["name"])
     region = extract_region(wine["name"])
     _rej   = rejections or {}
+    # Vérifier IP bloquée avant de gaspiller une requête
+    if _vivino_is_blocked():
+        return key, region, None
     if is_hard_to_match(key, _rej):
         return key, region, None
     rejected = get_rejected_urls(key, _rej)
+    # Délai léger entre requêtes pour éviter de déclencher le rate-limiter
+    time.sleep(0.15)
     result = fetch_vivino_via_api(key, wine.get("vintage"), slug=slug,
                                   rejected_urls=rejected,
                                   grapes_hint=wine.get("grapes_hint") or [])
@@ -2812,15 +2850,11 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
     """
     Boucle de scraping Vivino avec stratégie deux phases :
 
-    Phase 1 (rapide) — API parallèle × 8 workers :
-      Tous les vins sans verrou sont interrogés via l'API Vivino simultanément.
-      Les vins avec confiance ≥ VIVINO_SIMILARITY_MIN et une note sont acceptés.
+    Scraping Vivino via Selenium uniquement.
+    L'API publique Vivino ignore le paramètre de recherche — Selenium donne
+    des résultats précis et fiables.
 
-    Phase 2 (lente) — Selenium séquentiel :
-      Seulement les vins pour lesquels l'API n'a rien retourné ou dont la
-      confiance est trop faible. Une seule instance Chrome est démarrée.
-
-    Vitesse : 5-10× plus rapide qu'un scraping purement séquentiel.
+    Gestion des reprise via checkpoint, sauvegarde incrémentale, vins verrouillés.
     """
     found = 0
     done_count = len(wines) - len(todo)
@@ -2853,103 +2887,16 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
     if n_skip_hard and log:
         log(f"  ⚠️ {n_skip_hard} vins skippés (trop de rejets précédents)")
 
-    # ── PHASE 1 : API parallèle ────────────────────────────────────────────
-    # Sonde rapide : tester l'API sur 1 vin avant de lancer tous les workers.
-    # Permet de détecter immédiatement un blocage (403, HTML, structure changée).
-    if log:
-        log(f"⚡ Phase 1 : diagnostic API Vivino…")
-        try:
-            _probe_q = build_query(to_process[0]["name"])
-            _probe_resp = _SESSION.get(
-                "https://www.vivino.com/api/explore/explore",
-                params={"language": "fr", "q": _probe_q,
-                        "wine_type_ids[]": VIVINO_TYPE_IDS.get(slug, 1),
-                        "order_by": "ratings_count"},
-                timeout=VIVINO_API_TIMEOUT,
-            )
-            _ct = _probe_resp.headers.get("Content-Type", "?")
-            _st = _probe_resp.status_code
-            if _st == 200 and "json" in _ct:
-                _probe_data = _probe_resp.json()
-                _records = (_probe_data.get("explore_vintage") or {}).get("records") or []
-                log(f"  ℹ️ query={_probe_q!r} → {len(_records)} candidats")
-                for _ri, _r in enumerate(_records[:3]):
-                    _vo = _r.get("vintage") or {}
-                    _wo = _vo.get("wine") or {}
-                    _st2 = (_vo.get("statistics") or _wo.get("statistics") or {})
-                    _seo = _wo.get("seo_name","?")
-                    _title = f"{_wo.get('name','')} {_vo.get('name','')}".strip()
-                    _rating = _st2.get("ratings_average","?")
-                    _count  = _st2.get("ratings_count","?")
-                    log(f"  [{_ri+1}] {_title!r} | seo={_seo!r} | ★{_rating} · {_count}")
-            else:
-                log(f"  ⚠️ HTTP {_st} · {_ct} · {_probe_resp.text[:80]!r}")
-        except Exception as _pe:
-            log(f"  ⚠️ Probe échouée : {_pe}")
-    if log: log(f"⚡ Phase 1 : appels API parallèles pour {len(to_process)} vins…")
-    api_results: dict[str, tuple[str, dict | None]] = {}   # key → (region, result)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=_VIVINO_API_WORKERS) as pool:
-        futures = {pool.submit(_api_lookup_wine, w, slug, _rejections): w for w in to_process}
-        for fut in concurrent.futures.as_completed(futures):
-            try:
-                key, region, res = fut.result()
-                api_results[key] = (region, res)
-            except Exception:
-                w = futures[fut]
-                api_results[_key_of[id(w)]] = ("", None)
+    # ── Phase 1 (API) désactivée ──────────────────────────────────────────────
+    # L'API publique Vivino (/api/explore/explore) ignore le paramètre q et retourne
+    # les vins les plus populaires globalement (Marqués de Riscal, Meiomi…) sans
+    # rapport avec la query. Selenium donne des résultats corrects et précis.
+    need_selenium: list[tuple[dict, str]] = [
+        (w, extract_region(w["name"])) for w in to_process
+    ]
+    if log: log(f"🌐 Selenium pour {len(need_selenium)} vins…")
 
-    # Accepter les résultats API de bonne qualité
-    need_selenium: list[tuple[dict, str]] = []   # (wine, region)
-    for w in to_process:
-        key          = _key_of[id(w)]
-        region, res  = api_results.get(key, ("", None))
-        ean          = w.get("ean") or key
-        conf         = (res or {}).get("match_confidence") or 0
-        if res and (res.get("rating") or (res.get("vivino_url") and conf >= VIVINO_SIMILARITY_MIN)):
-            vc[key] = _make_vc_entry(res)
-            ckpt_tick(slug, ean)
-            done_count += 1
-            found += bool(res.get("rating"))
-            if log:
-                if res.get("rating"):
-                    log(f"  ⚡ [{done_count}/{len(wines)}] {w['name'][:40]} ★ {res['rating']} · {fmt_count(res.get('ratings_count'))}")
-                elif res.get("vivino_url"):
-                    log(f"  🔗 [{done_count}/{len(wines)}] {w['name'][:40]} (URL, conf {conf:.2f})")
-            # Sauvegarde incrémentale tous les 10 résultats → le polling temps réel
-            # voit les nouvelles notes au fur et à mesure (pas seulement à la fin)
-            if done_count % 10 == 0:
-                save_vivino_cache(vc, slug)
-        else:
-            need_selenium.append((w, region))
-
-    # ── Détection faux-positifs en masse ─────────────────────────────────────
-    # Si la même URL Vivino a été attribuée à > 5% des vins traités,
-    # c'est un signe que l'API retourne un vin générique pour toutes les queries.
-    # On annule ces entrées et on les renvoie en Selenium.
-    _url_counts: dict[str, int] = {}
-    for _k, _e in list(vc.items()):
-        _u = _e.get("vivino_url","")
-        if _u:
-            _url_counts[_u] = _url_counts.get(_u, 0) + 1
-    _fp_threshold = max(3, len(to_process) // 20)   # 5% ou minimum 3
-    _fp_urls = {_u for _u, _c in _url_counts.items() if _c > _fp_threshold}
-    if _fp_urls:
-        _reverted = 0
-        for _k in list(vc.keys()):
-            if vc[_k].get("vivino_url","") in _fp_urls:
-                _w_match = next((w for w in to_process if _key_of[id(w)] == _k), None)
-                if _w_match and (_w_match, api_results.get(_k, ("",""))[0]) not in need_selenium:
-                    need_selenium.append((_w_match, api_results.get(_k, ("",""))[0]))
-                del vc[_k]
-                _reverted += 1
-        found = sum(1 for e in vc.values() if e.get("rating"))
-        if log: log(f"  ⚠️ {_reverted} faux-positifs détectés (même URL × {_fp_threshold}+) → renvoyés en Selenium")
-
-    save_vivino_cache(vc, slug, _force_gist=True)   # fin Phase 1 → push Gist forcé
-    phase1_found = found
-    if log: log(f"  ✅ Phase 1 : {phase1_found} notes, {len(need_selenium)} vins restants pour Selenium")
-
-    # ── PHASE 2 : Selenium pour les cas difficiles ─────────────────────────
+    # ── PHASE 2 : Selenium (seule phase active) ────────────────────────────
     if not need_selenium:
         ckpt_finish(slug)
         if log: log(f"✅ Terminé — {found} notes · {len(vc)} entrées cache")
@@ -2963,7 +2910,19 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
             ean = wine.get("ean") or key
             vd  = fetch_vivino(driver, wine["name"], wine.get("vintage"),
                                slug=slug, region=region)
-            vc[key] = _make_vc_entry(vd)
+            _existing = vc.get(key, {})
+            _new_has_data = bool(vd.get("rating") or vd.get("vivino_url"))
+            _existing_has_data = bool(_existing.get("rating") or _existing.get("vivino_url"))
+            if _new_has_data:
+                # Résultat trouvé → écraser (meilleure donnée ou rafraîchissement)
+                vc[key] = _make_vc_entry(vd)
+            elif _existing_has_data:
+                # Selenium n'a rien trouvé mais on avait déjà une bonne entrée → garder
+                vc[key] = {**_existing, "cached_at": _existing.get("cached_at", time.time())}
+                if log: log(f"  ⚠️ [{done_count+1}/{len(wines)}] {wine['name'][:38]} — non trouvé, ancienne donnée conservée")
+            else:
+                # Rien trouvé, rien à garder → entrée vide (aucune note)
+                vc[key] = _make_vc_entry(vd)
             ckpt_tick(slug, ean)
             done_count += 1
             if vd.get("rating"):
@@ -2973,9 +2932,10 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
                 # Sauvegarde par batch de 5 notes → réduit I/O sans perdre de données
                 if found % 5 == 0:
                     save_vivino_cache(vc, slug)
-            else:
-                if log:
-                    log(f"  🔍 [{done_count}/{len(wines)}] {wine['name'][:45]} — aucune note")
+            elif _new_has_data:
+                if log: log(f"  🔗 [{done_count}/{len(wines)}] {wine['name'][:38]} — URL trouvée")
+            elif not _existing_has_data:
+                if log: log(f"  🔍 [{done_count}/{len(wines)}] {wine['name'][:45]} — aucune note")
             time.sleep(0.3)
     except Exception as e:
         interrupted = True
@@ -3102,7 +3062,20 @@ def run_refresh_vivino(slug: str, resume: bool = False, log=None) -> list:
         # ⑥ CORRIGÉ : ckpt_create appelle désormais ckpt_finish() en interne
         # pour nettoyer tout checkpoint stale avant d'en créer un nouveau
         ckpt_create(slug, len(wines))
+    # Exclure d'abord les vins du checkpoint (déjà traités dans cette session)
     todo = [w for w in wines if (w.get("ean") or build_query(w["name"])) not in done_eans]
+    # Exclure ensuite les vins déjà bien renseignés (note valide + non-stale + non-locked)
+    # pour ne pas écraser de bonnes données lors d'un rafraîchissement partiel.
+    def _is_fresh(w):
+        e = vc.get(build_query(w["name"]), {})
+        return (e.get("rating") and not e.get("_stale") and not e.get("locked") is False
+                and not e.get("suppressed"))
+    # Note : si done_eans vide (nouveau scrape) on respecte quand même les données fraîches
+    if not done_eans:
+        already_good = [w for w in todo if _is_fresh(w)]
+        todo = [w for w in todo if not _is_fresh(w)]
+        if already_good and log:
+            log(f"  ℹ️ {len(already_good)} vins déjà à jour ignorés (note valide, non-obsolète)")
     if not todo:
         if log: log("✅ Tous les vins sont déjà dans le cache !")
         ckpt_finish(slug)
@@ -3434,25 +3407,38 @@ for k, v in [("wines",[]),("loaded_slug",None),("data_ready",False)]:
 # @st.cache_resource = exécution 1× par instance (pas à chaque rerun)
 @st.cache_resource
 def _startup_restore():
-    """Restaure les données depuis le Gist si des fichiers de données sont absents.
+    """Restaure les données depuis le Gist si des fichiers sont absents ou vides.
 
-    Protections :
-    - Vérifie chaque fichier de données individuellement (pas juste "y a-t-il un .json")
-    - Restaure aussi les backups .bak si le fichier principal est absent
-    - Lance une restauration partielle si seuls certains fichiers manquent
+    Vérifie le CONTENU des fichiers, pas juste leur présence :
+    - Vivino : dict avec au moins 1 entrée
+    - Leclerc : dict avec clé "wines" non vide
+    Un fichier présent mais vide ({} ou {"wines":[]}) est traité comme manquant.
     """
-    _data_files = {
-        "leclerc_vins-rouges.json", "leclerc_vins-blancs.json",
-        "leclerc_vins-roses.json",  "leclerc_vins-mousseux-et-petillants.json",
-        "vivino_vins-rouges.json",  "vivino_vins-blancs.json",
-        "vivino_vins-roses.json",   "vivino_vins-mousseux-et-petillants.json",
-    }
-    # Récupérer les fichiers manquants
-    missing = [f for f in _data_files if not (CACHE_DIR / f).exists()]
-    if not missing:
-        return None   # tout est là
+    def _is_valid_vivino(p: Path) -> bool:
+        if not p.exists(): return False
+        try:
+            d = json.loads(p.read_text("utf-8"))
+            return isinstance(d, dict) and len(d) > 0
+        except Exception: return False
 
-    # Tentative 1 : backups .bak locaux pour les fichiers Vivino
+    def _is_valid_leclerc(p: Path) -> bool:
+        if not p.exists(): return False
+        try:
+            d = json.loads(p.read_text("utf-8"))
+            return isinstance(d, dict) and len(d.get("wines", [])) > 0
+        except Exception: return False
+
+    _SLUGS = ["vins-rouges", "vins-blancs", "vins-roses", "vins-mousseux-et-petillants"]
+    _checks = (
+        [(f"vivino_{s}.json",  _viv_path(s),  _is_valid_vivino)  for s in _SLUGS] +
+        [(f"leclerc_{s}.json", _lec_path(s),  _is_valid_leclerc) for s in _SLUGS]
+    )
+
+    missing = [fname for fname, path, check in _checks if not check(path)]
+    if not missing:
+        return None   # tout est présent ET valide
+
+    # Tentative 1 : backups .bak locaux
     restored_local = 0
     still_missing = []
     for fname in missing:
@@ -3461,8 +3447,11 @@ def _startup_restore():
             try:
                 content = bak.read_text("utf-8")
                 parsed  = json.loads(content)
-                if isinstance(parsed, dict) and len(parsed) > 0:
+                valid = (len(parsed.get("wines",[])) > 0
+                         if "leclerc" in fname else len(parsed) > 0)
+                if isinstance(parsed, dict) and valid:
                     (CACHE_DIR / fname).write_text(content, "utf-8")
+                    _invalidate_mem_cache(CACHE_DIR / fname)
                     restored_local += 1
                     continue
             except Exception:
@@ -3472,14 +3461,19 @@ def _startup_restore():
     if not still_missing:
         return f"✅ {restored_local} fichier(s) restaurés depuis backup local"
 
-    # Tentative 2 : Gist pour les fichiers encore manquants
+    # Tentative 2 : Gist
     if not _gist_is_configured():
+        import logging
+        logging.warning(f"[startup] {len(still_missing)} fichier(s) invalides/manquants, Gist non configuré : {still_missing}")
         return None
     n = restore_from_gist()
     total = restored_local + n
     if total > 0:
         return f"✅ {total} fichier(s) restaurés (Gist : {n}, backup local : {restored_local})"
-    return None
+    # Dernier recours : logger clairement ce qui manque
+    import logging
+    logging.warning(f"[startup] Restauration échouée pour : {still_missing}")
+    return f"⚠️ {len(still_missing)} fichier(s) non restaurés — vérifiez la config Gist"
 
 # Toast affiché 1× par session uniquement (pas à chaque rerun)
 _restore_msg = _startup_restore()
