@@ -2856,23 +2856,34 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
     # Sonde rapide : tester l'API sur 1 vin avant de lancer tous les workers.
     # Permet de détecter immédiatement un blocage (403, HTML, structure changée).
     if log:
-        log(f"⚡ Phase 1 : test API Vivino…")
+        log(f"⚡ Phase 1 : diagnostic API Vivino…")
         try:
+            _probe_q = build_query(to_process[0]["name"])
             _probe_resp = _SESSION.get(
                 "https://www.vivino.com/api/explore/explore",
-                params={"language": "fr", "q": to_process[0]["name"][:30],
+                params={"language": "fr", "q": _probe_q,
                         "wine_type_ids[]": VIVINO_TYPE_IDS.get(slug, 1)},
                 timeout=VIVINO_API_TIMEOUT,
             )
             _ct = _probe_resp.headers.get("Content-Type", "?")
             _st = _probe_resp.status_code
             if _st == 200 and "json" in _ct:
-                _keys = list((_probe_resp.json() or {}).keys())[:5]
-                log(f"  ℹ️ API Vivino → 200 JSON · clés: {_keys}")
+                _probe_data = _probe_resp.json()
+                _records = (_probe_data.get("explore_vintage") or {}).get("records") or []
+                log(f"  ℹ️ query={_probe_q!r} → {len(_records)} candidats")
+                for _ri, _r in enumerate(_records[:3]):
+                    _vo = _r.get("vintage") or {}
+                    _wo = _vo.get("wine") or {}
+                    _st2 = (_vo.get("statistics") or _wo.get("statistics") or {})
+                    _seo = _wo.get("seo_name","?")
+                    _title = f"{_wo.get('name','')} {_vo.get('name','')}".strip()
+                    _rating = _st2.get("ratings_average","?")
+                    _count  = _st2.get("ratings_count","?")
+                    log(f"  [{_ri+1}] {_title!r} | seo={_seo!r} | ★{_rating} · {_count}")
             else:
-                log(f"  ⚠️ API Vivino → HTTP {_st} · Content-Type: {_ct} · Body: {_probe_resp.text[:80]!r}")
+                log(f"  ⚠️ HTTP {_st} · {_ct} · {_probe_resp.text[:80]!r}")
         except Exception as _pe:
-            log(f"  ⚠️ API Vivino inaccessible : {_pe}")
+            log(f"  ⚠️ Probe échouée : {_pe}")
     if log: log(f"⚡ Phase 1 : appels API parallèles pour {len(to_process)} vins…")
     api_results: dict[str, tuple[str, dict | None]] = {}   # key → (region, result)
     with concurrent.futures.ThreadPoolExecutor(max_workers=_VIVINO_API_WORKERS) as pool:
