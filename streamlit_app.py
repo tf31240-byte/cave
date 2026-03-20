@@ -49,7 +49,7 @@ MAX_PAGES             = 15
 _VIVINO_API_WORKERS    = 8     # workers Phase 1 API parallèle
 LECLERC_CACHE_TTL     = 12 * 3600  # conservé pour compatibilité — plus utilisé (cache permanent)
 LECLERC_PAGE_SIZE     = 96
-VIVINO_SIMILARITY_MIN  = 0.28
+VIVINO_SIMILARITY_MIN  = 0.45   # relevé : 0.28 acceptait les faux-positifs API non triés
 VIVINO_CANDIDATES_MAX  = 8
 VIVINO_API_TIMEOUT     = 12   # augmenté : 8s trop court sur réseau lent
 VIVINO_CACHE_TTL_DAYS  = 30    # Entrées Vivino auto-marquées stale après N jours
@@ -2303,6 +2303,7 @@ def fetch_vivino_via_api(query: str, vintage, slug: str = "vins-rouges",
                 "price_range_min": 0,
                 "wine_type_ids[]": wine_type_id,
                 "q": query,
+                "order_by": "ratings_count",   # tri par popularité ≈ pertinence (seule valeur valide)
             },
             timeout=VIVINO_API_TIMEOUT,
         )
@@ -2862,7 +2863,8 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
             _probe_resp = _SESSION.get(
                 "https://www.vivino.com/api/explore/explore",
                 params={"language": "fr", "q": _probe_q,
-                        "wine_type_ids[]": VIVINO_TYPE_IDS.get(slug, 1)},
+                        "wine_type_ids[]": VIVINO_TYPE_IDS.get(slug, 1),
+                        "order_by": "ratings_count"},
                 timeout=VIVINO_API_TIMEOUT,
             )
             _ct = _probe_resp.headers.get("Content-Type", "?")
@@ -2919,6 +2921,29 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
                 save_vivino_cache(vc, slug)
         else:
             need_selenium.append((w, region))
+
+    # ── Détection faux-positifs en masse ─────────────────────────────────────
+    # Si la même URL Vivino a été attribuée à > 5% des vins traités,
+    # c'est un signe que l'API retourne un vin générique pour toutes les queries.
+    # On annule ces entrées et on les renvoie en Selenium.
+    _url_counts: dict[str, int] = {}
+    for _k, _e in list(vc.items()):
+        _u = _e.get("vivino_url","")
+        if _u:
+            _url_counts[_u] = _url_counts.get(_u, 0) + 1
+    _fp_threshold = max(3, len(to_process) // 20)   # 5% ou minimum 3
+    _fp_urls = {_u for _u, _c in _url_counts.items() if _c > _fp_threshold}
+    if _fp_urls:
+        _reverted = 0
+        for _k in list(vc.keys()):
+            if vc[_k].get("vivino_url","") in _fp_urls:
+                _w_match = next((w for w in to_process if _key_of[id(w)] == _k), None)
+                if _w_match and (_w_match, api_results.get(_k, ("",""))[0]) not in need_selenium:
+                    need_selenium.append((_w_match, api_results.get(_k, ("",""))[0]))
+                del vc[_k]
+                _reverted += 1
+        found = sum(1 for e in vc.values() if e.get("rating"))
+        if log: log(f"  ⚠️ {_reverted} faux-positifs détectés (même URL × {_fp_threshold}+) → renvoyés en Selenium")
 
     save_vivino_cache(vc, slug, _force_gist=True)   # fin Phase 1 → push Gist forcé
     phase1_found = found
@@ -3674,7 +3699,7 @@ with st.sidebar:
 
         # Bouton stop uniquement si même slug (sinon lecture seule)
         if not _cross_slug_job:
-            if st.button("⏹ Arrêter le scraping", use_container_width=True):
+            if st.button("⏹ Arrêter le scraping", width='stretch'):
                 ckpt_finish(slug)
                 save_job_state({"status": "done", "slug": slug, "mode": "stopped",
                                 "message": "Arrêté par l'utilisateur.",
@@ -3696,18 +3721,18 @@ with st.sidebar:
                 f'</div>',
                 unsafe_allow_html=True)
             col_r, col_x = st.columns(2)
-            with col_r: btn_resume = st.button("▶️ Reprendre", use_container_width=True, type="primary")
+            with col_r: btn_resume = st.button("▶️ Reprendre", width='stretch', type="primary")
             with col_x:
-                if st.button("✖ Annuler", use_container_width=True):
+                if st.button("✖ Annuler", width='stretch'):
                     ckpt_finish(slug); st.rerun()
         else:
             btn_resume = False
 
         btn_stock  = st.button("🔄 Mettre à jour le catalogue",
-                               use_container_width=True, type="primary",
+                               width='stretch', type="primary",
                                help="Vérifie les vins en rayon.")
         btn_vivino = st.button("🍷 Rafraîchir les notes Vivino",
-                               use_container_width=True,
+                               width='stretch',
                                help="Relance le scraping Vivino en arrière-plan.")
 
         n_zero_price  = sum(1 for w in (lc["wines"] if lc else []) if not w.get("price"))
@@ -3719,19 +3744,19 @@ with st.sidebar:
         if n_zero_price > 0 and lc:
             btn_repair_prices = st.button(
                 f"🔧 Réparer les prix ({n_zero_price})",
-                use_container_width=True,
+                width='stretch',
                 help=f"{n_zero_price} vins ont un prix à 0€.")
 
         if n_missing > 0 and lc:
             btn_fill = st.button(
                 f"🔎 Compléter les manquants ({n_missing})",
-                use_container_width=True,
+                width='stretch',
                 help=f"Scrape les {n_missing} vins sans données Vivino.")
 
         if n_stale_total > 0 and lc:
             btn_stale = st.button(
                 f"⏳ Rafraîchir les notes obsolètes ({n_stale_total})",
-                use_container_width=True,
+                width='stretch',
                 help=f"{n_stale_total} notes datent de plus de {VIVINO_CACHE_TTL_DAYS} jours.")
 
         # Statut job terminé / erreur
@@ -3763,7 +3788,7 @@ with st.sidebar:
             st.caption("☁️ **Persistance Gist** : activée")
         with gist_cols[1]:
             if st.button("↑", key="btn_sync_gist", help="Forcer la sauvegarde vers GitHub Gist maintenant",
-                         use_container_width=True):
+                         width='stretch'):
                 with st.spinner("Synchronisation…"):
                     ok = 0
                     for slug_s in WINE_TYPES.values():
@@ -4005,7 +4030,7 @@ for col, (label, fn) in zip([_sc1, _sc2, _sc3, _sc4], SORTS.items()):
         active = st.session_state.sort_key == label
         if st.button(label, key=f"sort_{label}",
                      type="primary" if active else "secondary",
-                     use_container_width=True, help=_SORT_HELP.get(label,"")):
+                     width='stretch', help=_SORT_HELP.get(label,"")):
             st.session_state.sort_key = label
             st.rerun()
 filtered.sort(key=SORTS.get(st.session_state.sort_key, SORTS["Q/P 💰"]))
@@ -4137,7 +4162,7 @@ with tab_rank:
                             label_visibility="collapsed")
                     with _r_cols[1]:
                         if st.button("✅ Confirmer", key=f"confirm_rej_{_uid}",
-                                     use_container_width=True, type="primary"):
+                                     width='stretch', type="primary"):
                             _vc_live = load_vivino_cache(slug)
                             _q = build_query(w["name"])
                             _old = _vc_live.get(_q, {})
@@ -4166,7 +4191,7 @@ with tab_rank:
                             st.rerun()
                     with _r_cols[2]:
                         if st.button("Annuler", key=f"cancel_rej_{_uid}",
-                                     use_container_width=True):
+                                     width='stretch'):
                             st.session_state.pop(_reject_key, None)
                             st.rerun()
 
@@ -4177,7 +4202,7 @@ with tab_rank:
                         unsafe_allow_html=True)
             nav_cols = st.columns([1, 2, 1])
             with nav_cols[0]:
-                if page > 0 and st.button("← Préc.", key=f"prev_{slug}", use_container_width=True):
+                if page > 0 and st.button("← Préc.", key=f"prev_{slug}", width='stretch'):
                     st.session_state[page_key] -= 1
                     st.rerun()
             with nav_cols[1]:
@@ -4189,7 +4214,7 @@ with tab_rank:
                     st.session_state[page_key] = jump - 1
                     st.rerun()
             with nav_cols[2]:
-                if page < n_pages - 1 and st.button("Suiv. →", key=f"next_{slug}", use_container_width=True):
+                if page < n_pages - 1 and st.button("Suiv. →", key=f"next_{slug}", width='stretch'):
                     st.session_state[page_key] += 1
                     st.rerun()
 
@@ -4342,7 +4367,7 @@ with tab_stats:
                     .configure_view(strokeWidth=0, fill="transparent")
                     .configure_axis(grid=False, labelFont="DM Mono", labelColor="#8B6B72", titleColor="#8B6B72")
                     .configure_title(color="#1A0810"))
-                st.altair_chart(chart_rat, use_container_width=True)
+                st.altair_chart(chart_rat, width='stretch')
             else:
                 st.caption("Aucune note disponible.")
 
@@ -4368,7 +4393,7 @@ with tab_stats:
                     .configure_view(strokeWidth=0, fill="transparent")
                     .configure_axis(grid=False, labelFont="DM Mono", labelColor="#8B6B72", titleColor="#8B6B72")
                     .configure_title(color="#1A0810"))
-                st.altair_chart(chart_pr, use_container_width=True)
+                st.altair_chart(chart_pr, width='stretch')
 
         st.divider()
         col_c, col_d = st.columns(2)
@@ -4388,7 +4413,7 @@ with tab_stats:
                 .configure_view(strokeWidth=0, fill="transparent")
                 .configure_axis(grid=False, labelFont="DM Sans", labelFontSize=11,
                                 labelColor="#8B6B72", titleColor="#8B6B72"))
-            st.altair_chart(chart_reg, use_container_width=True)
+            st.altair_chart(chart_reg, width='stretch')
 
         # Top régions par note moyenne (interactif)
         with col_d:
@@ -4422,7 +4447,7 @@ with tab_stats:
                     .configure_view(strokeWidth=0, fill="transparent")
                     .configure_axis(grid=False, labelFont="DM Sans", labelFontSize=11,
                                     labelColor="#8B6B72", titleColor="#8B6B72"))
-                st.altair_chart(chart_rg, use_container_width=True)
+                st.altair_chart(chart_rg, width='stretch')
             else:
                 st.caption("Données insuffisantes.")
 
@@ -4444,7 +4469,7 @@ with tab_data:
     st.markdown('<div class="tab-section">🗂️ Tous les vins chargés</div>', unsafe_allow_html=True)
     # Fix 5 : calculé une fois ici, réutilisé dans tab_export
     df_wines = _make_wines_df(wines)
-    st.dataframe(df_wines, use_container_width=True, hide_index=True, height=450,
+    st.dataframe(df_wines, width='stretch', hide_index=True, height=450,
                  column_config=_DF_COL_CONFIG)
 
     st.divider()
@@ -4466,7 +4491,7 @@ with tab_data:
         "🔒":        "🔒" if v.get("locked") else "",
         "Màj":       fmt_age(v.get("cached_at",0)),
     } for k, v in vc_now.items()])
-    st.dataframe(df_c, use_container_width=True, hide_index=True, height=400,
+    st.dataframe(df_c, width='stretch', hide_index=True, height=400,
         column_config={"Vivino":    st.column_config.LinkColumn(display_text="🍷"),
                        "Note":      st.column_config.NumberColumn(format="%.1f"),
                        "Millésime": st.column_config.TextColumn()})
@@ -4490,7 +4515,7 @@ with tab_data:
         url_input = st.text_input("URL Vivino", value=current.get("vivino_url", ""), key=f"manual_url_{slug}")
         col_a, col_b, col_c = st.columns(3)
 
-        if col_a.button("💾 Enregistrer correction", use_container_width=True):
+        if col_a.button("💾 Enregistrer correction", width='stretch'):
             try:
                 rating_val = None if not rating_input.strip() else float(str(rating_input).replace(",", "."))
                 if rating_val is not None and not (0 <= rating_val <= 5):
@@ -4516,7 +4541,7 @@ with tab_data:
             except Exception as e:
                 st.error(f"Valeur invalide: {e}")
 
-        if col_b.button("🧹 Supprimer info Vivino", use_container_width=True):
+        if col_b.button("🧹 Supprimer info Vivino", width='stretch'):
             vc_now[manual_key] = {
                 "rating": None,
                 "ratings_count": 0,
@@ -4532,7 +4557,7 @@ with tab_data:
             st.success("Info Vivino supprimée et verrouillée (ne sera plus auto-remplie).")
             st.rerun()
 
-        if col_c.button("🔓 Déverrouiller", use_container_width=True):
+        if col_c.button("🔓 Déverrouiller", width='stretch'):
             if manual_key in vc_now:
                 entry = dict(vc_now[manual_key])   # copie — évite mutation in-place
                 entry["locked"]          = False
@@ -4588,7 +4613,7 @@ with tab_data:
                     .configure_axis(grid=True, gridColor="#f0f0f0",
                                     labelFont="DM Mono", titleFont="DM Sans")
                 )
-                st.altair_chart(chart, use_container_width=True)
+                st.altair_chart(chart, width='stretch')
                 # Mini tableau résumé
                 first_p, last_p = df_sel["Prix"].iloc[0], df_sel["Prix"].iloc[-1]
                 delta = last_p - first_p
@@ -4601,7 +4626,7 @@ with tab_data:
             else:
                 st.caption(f"Un seul relevé pour ce vin — revenez après une prochaine vérification stock.")
                 st.dataframe(df_sel[["Date","Prix"]].rename(columns={"Prix":"Prix (€)"}),
-                             use_container_width=True, hide_index=True)
+                             width='stretch', hide_index=True)
 
 # ── EXPORT ────────────────────────────────────────────────────────────────
     # ── Export intégré ──────────────────────────────────────────────────────
@@ -4612,13 +4637,13 @@ with tab_data:
     with col1:
         st.markdown(f"**Vins filtrés** ({len(filtered)} vins)")
         df_f = _make_wines_df(filtered)
-        st.dataframe(df_f, use_container_width=True, hide_index=True, height=180,
+        st.dataframe(df_f, width='stretch', hide_index=True, height=180,
                      column_config=_DF_COL_CONFIG)
         dl_c1, dl_c2 = st.columns(2)
         with dl_c1:
             st.download_button("⬇️ CSV filtré",
                 df_f.drop(columns=["Query"], errors="ignore").to_csv(index=False, sep=";").encode("utf-8-sig"),
-                f"vins_{slug}_{today}.csv", "text/csv", use_container_width=True)
+                f"vins_{slug}_{today}.csv", "text/csv", width='stretch')
         with dl_c2:
             # Copier liste texte
             _exp_lines = []
@@ -4629,15 +4654,15 @@ with tab_data:
                 _exp_lines.append(f"{i}. {w['name']} — {' · '.join(parts)}")
             st.download_button("📋 Texte",
                 "\n".join(_exp_lines).encode("utf-8"),
-                f"vins_{slug}_{today}.txt", "text/plain", use_container_width=True,
+                f"vins_{slug}_{today}.txt", "text/plain", width='stretch',
                 help="Liste texte prête à coller dans un message")
     with col2:
         st.markdown(f"**Tous les vins** ({len(wines)} vins)")
-        st.dataframe(df_wines, use_container_width=True, hide_index=True, height=180,
+        st.dataframe(df_wines, width='stretch', hide_index=True, height=180,
                      column_config=_DF_COL_CONFIG)
         st.download_button("⬇️ CSV complet",
             df_wines.drop(columns=["Query"], errors="ignore").to_csv(index=False, sep=";").encode("utf-8-sig"),
-            f"vins_{slug}_complet_{today}.csv", "text/csv", use_container_width=True)
+            f"vins_{slug}_complet_{today}.csv", "text/csv", width='stretch')
 
 # ── CONSOLE ───────────────────────────────────────────────────────────────
 st.divider()
@@ -4684,7 +4709,7 @@ if _console_visible:
             _is_cross = _job_running_now and job.get("slug") != slug
             st.caption("⚡ mise à jour toutes les ~2 s")
     with _ch3:
-        if st.button("🗑️ Effacer", key="clear_console", use_container_width=True):
+        if st.button("🗑️ Effacer", key="clear_console", width='stretch'):
             try: JOB_LOG_PATH.write_text("", "utf-8")
             except Exception: pass
             st.session_state["console_open"] = False
@@ -4741,14 +4766,14 @@ with tab_rej:
                     "Hard":          "⚠️" if entry.get("hard_to_match") else "",
                 })
         df_rej = pd.DataFrame(rows_rej)
-        st.dataframe(df_rej, use_container_width=True, hide_index=True, height=350,
+        st.dataframe(df_rej, width='stretch', hide_index=True, height=350,
                      column_config={"URL rejetée": st.column_config.LinkColumn(display_text="🔗")})
         st.divider()
 
         # Actions
         ra1, ra2 = st.columns([1, 3])
         with ra1:
-            if st.button("🗑️ Effacer tous les rejets", use_container_width=True):
+            if st.button("🗑️ Effacer tous les rejets", width='stretch'):
                 try: REJECTION_LOG_PATH.unlink(missing_ok=True)
                 except Exception: pass
                 st.toast("Rejets effacés.", icon="🗑️")
