@@ -2303,7 +2303,6 @@ def fetch_vivino_via_api(query: str, vintage, slug: str = "vins-rouges",
                 "price_range_min": 0,
                 "wine_type_ids[]": wine_type_id,
                 "q": query,
-                "order_by": "match",
             },
             timeout=VIVINO_API_TIMEOUT,
         )
@@ -2862,8 +2861,7 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
             _probe_resp = _SESSION.get(
                 "https://www.vivino.com/api/explore/explore",
                 params={"language": "fr", "q": to_process[0]["name"][:30],
-                        "wine_type_ids[]": VIVINO_TYPE_IDS.get(slug, 1),
-                        "order_by": "match"},
+                        "wine_type_ids[]": VIVINO_TYPE_IDS.get(slug, 1)},
                 timeout=VIVINO_API_TIMEOUT,
             )
             _ct = _probe_resp.headers.get("Content-Type", "?")
