@@ -4447,9 +4447,9 @@ with tab_stats:
         df_s = pd.DataFrame([{
             "Nom":      w["name"],
             "Région":   w.get("region") or "Inconnue",
-            "Note":     w.get("rating"),
-            "Prix":     w.get("price") or 0,
-            "Score":    w.get("score") or 0,
+            "Note":     float(w["rating"]) if w.get("rating") is not None else None,
+            "Prix":     float(w["price"]) if w.get("price") else None,
+            "Score":    float(w["score"]) if w.get("score") else None,
             "Dispo":    w.get("available", True),
             "Tendance": w.get("price_trend", ""),
         } for w in filtered])
@@ -4589,13 +4589,18 @@ with tab_data:
     n_av   = sum(1 for v in vc_now.values() if (v.get("ratings_count") or 0) > 0)
     n_url2 = sum(1 for v in vc_now.values() if v.get("vivino_url"))
     st.caption(f"{len(vc_now)} entrées · {n_ok} notes · {n_av} nb avis · {n_url2} URLs")
+    def _vnum(v): return float(v) if v is not None and v != "" else None
+    def _vyear(v):
+        if v is None or v == "": return ""
+        try: return str(int(v))
+        except: return str(v)
     df_c = pd.DataFrame([{
         "Query":     k,
-        "Note":      v.get("rating") or "",
-        "Nb avis":   v.get("ratings_count") or "",
+        "Note":      _vnum(v.get("rating")),
+        "Nb avis":   _vnum(v.get("ratings_count")),
         "Vivino":    v.get("vivino_url") or "",
-        "Millésime": str(int(v["vivino_year"])) if isinstance(v.get("vivino_year"), (int, float)) else (v.get("vivino_year") or ""),
-        "Confiance": v.get("match_confidence") or "",
+        "Millésime": _vyear(v.get("vivino_year")),
+        "Confiance": _vnum(v.get("match_confidence")),
         "Type":      vivino_cache_type(v),
         "🔒":        "🔒" if v.get("locked") else "",
         "Màj":       fmt_age(v.get("cached_at",0)),
@@ -4603,6 +4608,8 @@ with tab_data:
     st.dataframe(df_c, width='stretch', hide_index=True, height=400,
         column_config={"Vivino":    st.column_config.LinkColumn(display_text="🍷"),
                        "Note":      st.column_config.NumberColumn(format="%.1f"),
+                       "Nb avis":   st.column_config.NumberColumn(format="%d"),
+                       "Confiance": st.column_config.NumberColumn(format="%.2f"),
                        "Millésime": st.column_config.TextColumn()})
 
     st.divider()
