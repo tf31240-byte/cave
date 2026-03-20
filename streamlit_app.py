@@ -47,6 +47,7 @@ from datetime import datetime
 STORE_CODE            = "1431"
 MAX_PAGES             = 15
 _VIVINO_API_WORKERS    = 4     # conservé pour compatibilité (Phase 1 désactivée)
+_VIVINO_SEL_WORKERS    = 3     # drivers Selenium parallèles pour Vivino
 LECLERC_CACHE_TTL     = 12 * 3600  # conservé pour compatibilité — plus utilisé (cache permanent)
 LECLERC_PAGE_SIZE     = 96
 VIVINO_SIMILARITY_MIN  = 0.45   # relevé : 0.28 acceptait les faux-positifs API non triés
@@ -2106,29 +2107,45 @@ def _extract_year(text: str) -> int | None:
 
 def vivino_candidates_from_search(html: str, max_candidates: int = VIVINO_CANDIDATES_MAX) -> list[dict]:
     """
-    Retourne plusieurs candidats Vivino depuis la page de recherche.
-    
-    ① CORRIGÉ : l'ancienne regex r"/w/[0-9]+" ne matchait que les URLs numériques
-    (ex: /w/12345). Les URLs Vivino modernes sont slug-based :
-      /w/chateau-latour-rouge-2019  ou  /wines/chateau-margaux
-    Nouvelle regex : r"/w(?:ines)?/[^/?&#\x20]+" pour couvrir les deux formats.
+    Retourne plusieurs candidats depuis la page de recherche Vivino.
+    Extrait aussi rating/count depuis les JSON embarqués → évite la 2e navigation.
     """
+    # ── Extraire ratings depuis les JSON embarqués ──────────────────────────
+    # La page React encode les données de chaque carte dans des blocs JSON.
+    # On parse tous les blocs pour construire seo_name→(rating, count, nb_all).
+    _ratings_by_seo: dict[str, tuple] = {}
+    for m in re.finditer(r'"seo_name"\s*:\s*"([^"]+)"[^}]{0,600}?"ratings_average"\s*:\s*([\d.]+)[^}]{0,200}?"ratings_count"\s*:\s*(\d+)', html):
+        seo, avg, cnt = m.group(1), float(m.group(2)), int(m.group(3))
+        if seo not in _ratings_by_seo:
+            _ratings_by_seo[seo] = (avg, cnt)
+    # Fallback: parser les ratings_count_all (niveau wine, pas vintage)
+    _all_by_seo: dict[str, int] = {}
+    for m in re.finditer(r'"seo_name"\s*:\s*"([^"]+)"[^}]{0,800}?"ratings_count"\s*:\s*(\d+)', html):
+        seo = m.group(1)
+        if seo not in _all_by_seo:
+            _all_by_seo[seo] = int(m.group(2))
+
     soup = BeautifulSoup(html, "html.parser")
     out, seen = [], set()
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        # ① CORRIGÉ : regex étendue pour les URLs slug-based
         if not _VIVINO_WINE_HREF_RE.search(href) or "search" in href:
             continue
         url = href if href.startswith("http") else f"https://www.vivino.com{href}"
         if url in seen:
             continue
         seen.add(url)
-        title = a.get_text(separator=" ", strip=True)   # calculé 1× seulement
+        title = a.get_text(separator=" ", strip=True)
+        # Extraire le seo_name depuis l'URL pour le lookup rating
+        _seo_m = re.search(r"/w(?:ines)?/([^/?&#]+)", href)
+        _seo = _seo_m.group(1) if _seo_m else ""
+        _rating, _count = _ratings_by_seo.get(_seo, (None, 0))
         out.append({
-            "url":   url,
-            "title": title,
-            "year":  _extract_year(title),              # réutilise title
+            "url":    url,
+            "title":  title,
+            "year":   _extract_year(title),
+            "rating": _rating,          # None si absent de la page
+            "ratings_count": _count,
         })
         if len(out) >= max_candidates:
             break
@@ -2691,14 +2708,7 @@ def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", reg
              "vivino_url": "", "vivino_year": None, "vintage_match": None,
              "match_confidence": 0.0}
     query = build_query(wine_name)
-
-    # ⑩ Appel API unique — on accepte si confiance ≥ 0.35 ou note présente
     _gh = extract_grapes_from_name(wine_name)
-    api_data = fetch_vivino_via_api(query, vintage, slug=slug, grapes_hint=_gh)
-    if api_data:
-        conf = api_data.get("match_confidence") or 0
-        if api_data.get("rating") or (api_data.get("vivino_url") and conf >= 0.35):
-            return api_data
 
     # Selenium : query enrichie avec le millésime pour plus de précision
     # Si zéro candidat, on essaie les requêtes de repli (_fallback_queries)
@@ -2748,6 +2758,31 @@ def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", reg
     if not wine_url:
         return EMPTY
 
+    _enriched_empty = {
+        "ratings_count_all": 0, "vivino_name": "", "winery": "",
+        "vivino_region": "", "vivino_region_seo": "", "country": "",
+        "grapes": [], "style_name": "", "is_natural": False,
+        "acidity": None, "tannin": None, "sweetness": None, "body": None,
+    }
+
+    vy = _safe_year(best.get("year")) if best.get("year") else None
+    vmatch = None
+    if vintage and vy:   vmatch = (vintage == vy)
+    elif not vintage:    vmatch = True
+
+    # ── Optimisation : rating déjà disponible depuis la page de recherche ──
+    # Si vivino_candidates_from_search a pu extraire le rating directement,
+    # on évite la 2e navigation (wine page) : gain ~1.5s par vin.
+    if best.get("rating"):
+        return {**_enriched_empty,
+                "rating":           best["rating"],
+                "ratings_count":    best.get("ratings_count", 0),
+                "vivino_url":       wine_url,
+                "vivino_year":      vy,
+                "vintage_match":    vmatch,
+                "match_confidence": round(confidence, 3)}
+
+    # ── Fallback : naviguer sur la page du vin pour extraire le rating ──────
     try:
         driver.get(wine_url)
         _wine_waited = False
@@ -2759,31 +2794,13 @@ def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", reg
         except Exception: pass
         time.sleep(0.5 if _wine_waited else 1.5)
         d = parse_wine_jsonld(driver.page_source)
+        # Affiner le millésime depuis l'URL de la page wine (plus fiable que le titre)
+        m = _VIVINO_YEAR_URL_RE.search(driver.current_url)
+        if m:
+            vy = _safe_year(m.group(1))
+            if vintage and vy: vmatch = (vintage == vy)
     except Exception:
         return EMPTY
-
-    vy = None
-    m = _VIVINO_YEAR_URL_RE.search(driver.current_url)
-    if m:
-        vy = _safe_year(m.group(1))
-    elif best.get("year"):
-        vy = _safe_year(best.get("year"))
-
-    vmatch = None
-    if vintage and vy:
-        vmatch = (vintage == vy)
-    elif not vintage:
-        vmatch = True
-
-    # Champs enrichis vides — Selenium ne donne pas accès à l'API JSON Vivino
-    # qui contient winery/grapes/region/style. Ils resteront vides dans le cache
-    # et seront remplis lors du prochain scrape API ou d'un refresh.
-    _enriched_empty = {
-        "ratings_count_all": 0, "vivino_name": "", "winery": "",
-        "vivino_region": "", "vivino_region_seo": "", "country": "",
-        "grapes": [], "style_name": "", "is_natural": False,
-        "acidity": None, "tannin": None, "sweetness": None, "body": None,
-    }
 
     if not d.get("rating"):
         return {**_enriched_empty, "rating": None, "ratings_count": 0,
@@ -2894,57 +2911,145 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
     need_selenium: list[tuple[dict, str]] = [
         (w, extract_region(w["name"])) for w in to_process
     ]
-    if log: log(f"🌐 Selenium pour {len(need_selenium)} vins…")
 
-    # ── PHASE 2 : Selenium (seule phase active) ────────────────────────────
+    # ── Selenium (seule phase active) ─────────────────────────────────────
     if not need_selenium:
         ckpt_finish(slug)
         if log: log(f"✅ Terminé — {found} notes · {len(vc)} entrées cache")
         return
 
-    if log: log(f"🌐 Phase 2 : Selenium pour {len(need_selenium)} vins…")
+    n_w = min(_VIVINO_SEL_WORKERS, len(need_selenium))
+    if log: log(f"🌐 Selenium ×{n_w} workers — {len(need_selenium)} vins…")
+
+    # _results : key → vd (écrit par workers, lu par thread principal)
+    # Thread-safe : workers n'écrivent que dans _results (protégé par lock),
+    # le thread principal est le seul à lire/écrire vc.
+    _results_lock = threading.Lock()
+    _results: dict[str, dict] = {}
+
+    # _pending : key → (wine, region) — construit avec id() unique pour éviter
+    # les collisions de build_query sur deux vins au nom similaire
+    _pending: dict[str, tuple] = {}
+    for w, r in need_selenium:
+        k = _key_of[id(w)]
+        # Si collision de query (deux vins → même key), on préfixe avec l'EAN
+        if k in _pending:
+            k = f"{k}__{w.get('ean') or id(w)}"
+        _pending[k] = (w, r)
+    # Reconstruire need_selenium avec les clés dé-dupliquées
+    _ns_keyed: list[tuple[str, dict, str]] = []
+    _seen_ids: dict[int, str] = {}
+    for w, r in need_selenium:
+        base_k = _key_of[id(w)]
+        k = base_k if _pending.get(base_k, (w,))[0] is w else f"{base_k}__{w.get('ean') or id(w)}"
+        _seen_ids[id(w)] = k
+        _ns_keyed.append((k, w, r))
+
+    def _worker_scrape(chunk: list[tuple[str,dict,str]], worker_id: int) -> None:
+        """Un worker scrape son chunk avec son propre driver Chrome."""
+        _drv = None
+        try:
+            _drv = make_driver()
+            for key, wine, region in chunk:
+                try:
+                    vd = fetch_vivino(_drv, wine["name"], wine.get("vintage"),
+                                      slug=slug, region=region)
+                except Exception:
+                    vd = {"rating": None, "ratings_count": 0, "vivino_url": "",
+                          "vivino_year": None, "vintage_match": None, "match_confidence": 0.0}
+                with _results_lock:
+                    _results[key] = vd
+        except Exception as _we:
+            # Worker planté → marquer tous ses vins non traités comme vides
+            # pour ne pas bloquer la boucle de polling
+            with _results_lock:
+                for _k, _w, _r in chunk:
+                    if _k not in _results:
+                        _results[_k] = {"rating": None, "ratings_count": 0,
+                                        "vivino_url": "", "vivino_year": None,
+                                        "vintage_match": None, "match_confidence": 0.0}
+        finally:
+            if _drv:
+                try: _drv.quit()
+                except Exception: pass
+
+    # Découper en chunks round-robin pour équilibrer la charge
+    chunks: list[list] = [[] for _ in range(n_w)]
+    for i, item in enumerate(_ns_keyed):
+        chunks[i % n_w].append(item)
+
+    threads = [threading.Thread(target=_worker_scrape, args=(chunk, i), daemon=True)
+               for i, chunk in enumerate(chunks) if chunk]
+    for t in threads: t.start()
+
+    # Polling : traiter les résultats au fur et à mesure
+    _processed: set[str] = set()
+    _total = len(_ns_keyed)
     try:
-        driver = make_driver()
-        for wine, region in need_selenium:    # Fix 13 : region déjà calculée en Phase 1
-            key = _key_of[id(wine)]
-            ean = wine.get("ean") or key
-            vd  = fetch_vivino(driver, wine["name"], wine.get("vintage"),
-                               slug=slug, region=region)
-            _existing = vc.get(key, {})
-            _new_has_data = bool(vd.get("rating") or vd.get("vivino_url"))
-            _existing_has_data = bool(_existing.get("rating") or _existing.get("vivino_url"))
-            if _new_has_data:
-                # Résultat trouvé → écraser (meilleure donnée ou rafraîchissement)
-                vc[key] = _make_vc_entry(vd)
-            elif _existing_has_data:
-                # Selenium n'a rien trouvé mais on avait déjà une bonne entrée → garder
-                vc[key] = {**_existing, "cached_at": _existing.get("cached_at", time.time())}
-                if log: log(f"  ⚠️ [{done_count+1}/{len(wines)}] {wine['name'][:38]} — non trouvé, ancienne donnée conservée")
-            else:
-                # Rien trouvé, rien à garder → entrée vide (aucune note)
-                vc[key] = _make_vc_entry(vd)
-            ckpt_tick(slug, ean)
-            done_count += 1
-            if vd.get("rating"):
-                found += 1
-                if log: log(f"  ✅ [{done_count}/{len(wines)}] {wine['name'][:38]}\n"
-                            f"     ★ {vd['rating']} · {fmt_count(vd.get('ratings_count'))} avis")
-                # Sauvegarde par batch de 5 notes → réduit I/O sans perdre de données
-                if found % 5 == 0:
-                    save_vivino_cache(vc, slug)
-            elif _new_has_data:
-                if log: log(f"  🔗 [{done_count}/{len(wines)}] {wine['name'][:38]} — URL trouvée")
-            elif not _existing_has_data:
-                if log: log(f"  🔍 [{done_count}/{len(wines)}] {wine['name'][:45]} — aucune note")
-            time.sleep(0.3)
+        while len(_processed) < _total:
+            # Arrêt anticipé si tous les threads sont morts ET plus rien à venir
+            if all(not t.is_alive() for t in threads):
+                with _results_lock:
+                    _ready_now = {k: v for k, v in _results.items() if k not in _processed}
+                # Traiter ce qui reste puis sortir
+                for key, vd in _ready_now.items():
+                    if key not in _pending: continue
+                    wine, region = _pending[key]
+                    ean = wine.get("ean") or key
+                    _existing = vc.get(_key_of[id(wine)], {})
+                    _new_has  = bool(vd.get("rating") or vd.get("vivino_url"))
+                    _had_data = bool(_existing.get("rating") or _existing.get("vivino_url"))
+                    vc[_key_of[id(wine)]] = _make_vc_entry(vd) if _new_has else (
+                        {**_existing, "cached_at": _existing.get("cached_at", time.time())}
+                        if _had_data else _make_vc_entry(vd))
+                    ckpt_tick(slug, ean)
+                    done_count += 1; _processed.add(key)
+                    if vd.get("rating"): found += 1
+                # Marquer les non-traités comme interrompus
+                if len(_processed) < _total:
+                    interrupted = True
+                break
+
+            with _results_lock:
+                _ready = {k: v for k, v in _results.items() if k not in _processed}
+            for key, vd in _ready.items():
+                if key not in _pending: continue
+                wine, region = _pending[key]
+                ean = wine.get("ean") or key
+                orig_key = _key_of[id(wine)]
+                _existing = vc.get(orig_key, {})
+                _new_has  = bool(vd.get("rating") or vd.get("vivino_url"))
+                _had_data = bool(_existing.get("rating") or _existing.get("vivino_url"))
+                if _new_has:
+                    vc[orig_key] = _make_vc_entry(vd)
+                elif _had_data:
+                    vc[orig_key] = {**_existing, "cached_at": _existing.get("cached_at", time.time())}
+                else:
+                    vc[orig_key] = _make_vc_entry(vd)
+                ckpt_tick(slug, ean)
+                done_count += 1
+                _processed.add(key)
+                if vd.get("rating"):
+                    found += 1
+                    if log: log(f"  ✅ [{done_count}/{len(wines)}] {wine['name'][:38]}\n"
+                                f"     ★ {vd['rating']} · {fmt_count(vd.get('ratings_count'))} avis")
+                    if found % 5 == 0:
+                        save_vivino_cache(vc, slug)
+                elif _new_has:
+                    if log: log(f"  🔗 [{done_count}/{len(wines)}] {wine['name'][:38]} — URL trouvée")
+                elif _had_data:
+                    if log: log(f"  ⚠️ [{done_count}/{len(wines)}] {wine['name'][:38]} — non trouvé, données conservées")
+                else:
+                    if log: log(f"  🔍 [{done_count}/{len(wines)}] {wine['name'][:45]} — aucune note")
+            if len(_processed) < _total:
+                time.sleep(0.5)
+        for t in threads: t.join(timeout=10)   # laisser le temps aux drivers de se fermer
     except Exception as e:
         interrupted = True
+        for t in threads: t.join(timeout=3)
         if log: log(f"⚠️ Interrompu à [{done_count}/{len(wines)}] : {e}")
     finally:
-        if driver is not None:
-            try: driver.quit()
-            except Exception: pass
-        save_vivino_cache(vc, slug, _force_gist=True)   # fin Phase 2 → push Gist forcé
+        save_vivino_cache(vc, slug, _force_gist=True)
         remaining = len(wines) - done_count
         if interrupted or remaining > 0:
             if log: log(f"\n⚠️ {done_count}/{len(wines)} traités · {remaining} restants\n"
