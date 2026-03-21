@@ -449,9 +449,9 @@ footer{display:none !important}
 div[class*="st-key-bad_viv_"]{
   display:flex !important;
   justify-content:flex-end !important;
+  width:100% !important;
   margin-top:-2.4rem !important;
   margin-bottom:.35rem !important;
-  padding-right:0 !important;
   pointer-events:none !important;
   position:relative !important;
   z-index:10 !important}
