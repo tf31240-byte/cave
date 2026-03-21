@@ -885,17 +885,26 @@ def restore_from_gist() -> int:
     try:
         resp = requests.get(f"{_GIST_API}/{gid}", headers=headers, timeout=20)
         resp.raise_for_status()
-        all_files = {
-            fname: fdata.get("content", "")
-            for fname, fdata in resp.json().get("files", {}).items()
-            if fdata.get("content")
-        }
+        gist_data = resp.json()
     except Exception:
         return 0
     restored = 0
-    for fname, file_content in all_files.items():
+    for fname, fdata in gist_data.get("files", {}).items():
+        # ── Récupérer le contenu complet (gérer la troncature GitHub) ────────
+        # L'API tronque les fichiers > 1MB : truncated=True + raw_url pour le complet.
+        file_content = fdata.get("content", "")
+        if fdata.get("truncated") or not file_content:
+            raw_url = fdata.get("raw_url", "")
+            if raw_url:
+                try:
+                    r2 = requests.get(raw_url, headers=headers, timeout=30)
+                    r2.raise_for_status()
+                    file_content = r2.text
+                except Exception:
+                    pass
         if not file_content:
             continue
+
         # Migration : vivino.json (ancien monolithique) → vivino_vins-rouges.json
         if fname == "vivino.json":
             target = CACHE_DIR / "vivino_vins-rouges.json"
