@@ -443,35 +443,41 @@ footer{display:none !important}
   border-bottom:2.5px solid var(--bx) !important}
 
 /* ═══════════════ BOUTON 🚫 ═══════════════
-   Le st.button suit le st.markdown de la carte.
-   margin-top négatif + position absolute le place au coin bas-droit de la carte.
+   Positionné sur le bord droit de la carte, centré verticalement.
+   Invisible au repos, discret au survol de la carte, rouge au survol direct.
    ══════════════════════════════════════ */
 div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]){
   position:absolute !important;
-  margin-top:-2.15rem !important;
-  right:.55rem !important;
+  right:-1px !important;
+  top:50% !important;
+  transform:translateY(-50%) !important;
+  margin:0 !important;
   width:auto !important;
   z-index:20 !important;
   pointer-events:none !important}
 div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]) button{
   pointer-events:auto !important;
-  height:20px !important;width:24px !important;padding:0 !important;
-  min-height:0 !important;font-size:.72rem !important;line-height:1 !important;
-  background:transparent !important;
-  border:1px solid rgba(220,38,38,.2) !important;
-  border-radius:5px !important;color:rgba(220,38,38,.28) !important;
-  opacity:0 !important;transform:scale(.85) !important;
-  transition:opacity .15s,transform .15s,color .13s,
-             border-color .13s,background .13s !important}
-/* Apparaît au survol de la carte */
+  height:28px !important;width:14px !important;padding:0 !important;
+  min-height:0 !important;font-size:.55rem !important;line-height:1 !important;
+  background:var(--card) !important;
+  border:1px solid transparent !important;
+  border-radius:0 4px 4px 0 !important;
+  color:rgba(220,38,38,.0) !important;
+  box-shadow:none !important;
+  opacity:0 !important;
+  transition:opacity .15s,color .13s,border-color .13s,background .13s !important}
+/* Apparaît (discret) au survol de la carte */
 div[data-testid="stMarkdownContainer"]:has(.wine-card):hover
 ~ div[data-testid="stButton"] button[title*="Vivino incorrect"],
 div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]):hover button{
-  opacity:1 !important;transform:scale(1) !important}
+  opacity:1 !important;
+  color:rgba(220,38,38,.35) !important;
+  border-color:rgba(220,38,38,.2) !important}
+/* Rouge au survol direct */
 div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]) button:hover{
-  opacity:1 !important;transform:scale(1.12) !important;
-  color:#dc2626 !important;border-color:rgba(220,38,38,.65) !important;
-  background:rgba(220,38,38,.08) !important}
+  color:#dc2626 !important;
+  border-color:rgba(220,38,38,.6) !important;
+  background:rgba(220,38,38,.06) !important}
 
 /* ═══════════════ PAGINATION ═══════════════ */
 .page-info{
@@ -666,7 +672,12 @@ div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]) button:hover{
     color:#fda4af !important;border-bottom-color:#fda4af !important;
     background:rgba(253,164,175,.05) !important}
   div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]) button{
-    border-color:rgba(253,164,175,.18) !important;color:rgba(253,164,175,.25) !important}
+    background:#1C1015 !important;
+    border-color:transparent !important;color:rgba(253,164,175,.0) !important}
+  div[data-testid="stMarkdownContainer"]:has(.wine-card):hover
+  ~ div[data-testid="stButton"] button[title*="Vivino incorrect"],
+  div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]):hover button{
+    color:rgba(253,164,175,.35) !important;border-color:rgba(253,164,175,.2) !important}
   div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]) button:hover{
     color:#fda4af !important;border-color:rgba(253,164,175,.65) !important;
     background:rgba(253,164,175,.09) !important}
