@@ -442,42 +442,50 @@ footer{display:none !important}
   background:rgba(107,26,42,.05) !important;
   border-bottom:2.5px solid var(--bx) !important}
 
+/* Parent commun markdown+bouton : doit être position:relative pour ancrer le 🚫 */
+div[data-testid="stVerticalBlock"]:has(div[class*="st-key-bad_viv_"]),
+div[data-testid="stVerticalBlockBorderWrapper"]:has(div[class*="st-key-bad_viv_"]){
+  position:relative !important}
+
 /* ═══════════════ BOUTON 🚫 ═══════════════
-   Positionné sur le bord droit de la carte, centré verticalement.
-   Invisible au repos, discret au survol de la carte, rouge au survol direct.
+   stElementContainer est le vrai parent (d'après l'HTML inspecté).
+   On le sort du flux et on le colle sur le bord droit de la carte.
+   Le parent .stElementContainer parent du markdown et du bouton doit
+   être position:relative — on cible le bloc englobant via st-key-bad_viv_.
    ══════════════════════════════════════ */
-div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]){
+div[class*="st-key-bad_viv_"]{
   position:absolute !important;
-  right:-1px !important;
+  right:0 !important;
   top:50% !important;
   transform:translateY(-50%) !important;
   margin:0 !important;
   width:auto !important;
   z-index:20 !important;
   pointer-events:none !important}
-div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]) button{
+div[class*="st-key-bad_viv_"] button{
   pointer-events:auto !important;
-  height:28px !important;width:14px !important;padding:0 !important;
-  min-height:0 !important;font-size:.55rem !important;line-height:1 !important;
+  height:30px !important;width:16px !important;padding:0 !important;
+  min-height:0 !important;font-size:.5rem !important;line-height:1 !important;
   background:var(--card) !important;
   border:1px solid transparent !important;
+  border-left:none !important;
   border-radius:0 4px 4px 0 !important;
-  color:rgba(220,38,38,.0) !important;
+  color:transparent !important;
   box-shadow:none !important;
   opacity:0 !important;
-  transition:opacity .15s,color .13s,border-color .13s,background .13s !important}
-/* Apparaît (discret) au survol de la carte */
+  transition:opacity .18s,color .13s,border-color .13s,background .13s !important}
+/* Survol de la carte → apparaît */
 div[data-testid="stMarkdownContainer"]:has(.wine-card):hover
-~ div[data-testid="stButton"] button[title*="Vivino incorrect"],
-div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]):hover button{
+~ div[class*="st-key-bad_viv_"] button,
+div[class*="st-key-bad_viv_"]:hover button{
   opacity:1 !important;
-  color:rgba(220,38,38,.35) !important;
-  border-color:rgba(220,38,38,.2) !important}
-/* Rouge au survol direct */
-div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]) button:hover{
+  color:rgba(220,38,38,.4) !important;
+  border-color:rgba(220,38,38,.25) !important}
+/* Survol direct → rouge */
+div[class*="st-key-bad_viv_"] button:hover{
   color:#dc2626 !important;
-  border-color:rgba(220,38,38,.6) !important;
-  background:rgba(220,38,38,.06) !important}
+  border-color:rgba(220,38,38,.7) !important;
+  background:rgba(220,38,38,.07) !important}
 
 /* ═══════════════ PAGINATION ═══════════════ */
 .page-info{
@@ -671,15 +679,15 @@ div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]) button:hover{
   [data-testid="stTabs"] [aria-selected="true"]{
     color:#fda4af !important;border-bottom-color:#fda4af !important;
     background:rgba(253,164,175,.05) !important}
-  div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]) button{
+  div[class*="st-key-bad_viv_"] button{
     background:#1C1015 !important;
-    border-color:transparent !important;color:rgba(253,164,175,.0) !important}
+    border-color:transparent !important;color:transparent !important}
   div[data-testid="stMarkdownContainer"]:has(.wine-card):hover
-  ~ div[data-testid="stButton"] button[title*="Vivino incorrect"],
-  div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]):hover button{
-    color:rgba(253,164,175,.35) !important;border-color:rgba(253,164,175,.2) !important}
-  div[data-testid="stButton"]:has(button[title*="Vivino incorrect"]) button:hover{
-    color:#fda4af !important;border-color:rgba(253,164,175,.65) !important;
+  ~ div[class*="st-key-bad_viv_"] button,
+  div[class*="st-key-bad_viv_"]:hover button{
+    color:rgba(253,164,175,.4) !important;border-color:rgba(253,164,175,.25) !important}
+  div[class*="st-key-bad_viv_"] button:hover{
+    color:#fda4af !important;border-color:rgba(253,164,175,.7) !important;
     background:rgba(253,164,175,.09) !important}
   /* Altair : fond transparent déjà géré via CSS, textes adaptés */
   .vega-embed .mark-text text{fill:#EDD5DA !important}
