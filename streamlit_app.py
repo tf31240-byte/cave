@@ -4028,24 +4028,28 @@ gist_id      = ""
     # Fix G : la recherche couvre aussi la région
     search = st.text_input("🔍 Recherche (nom ou région)", placeholder="Bordeaux, Guigal, Pomerol…")
 
-    # Max prix dynamique depuis les données réelles (plus de 200€ fixe)
+    # Max prix dynamique depuis les données réelles
     _all_wines  = st.session_state.get("wines") or []
     _price_max  = max((w.get("price") or 0 for w in _all_wines), default=200)
     _price_ceil = max(200, int(math.ceil(_price_max / 10) * 10))
 
-    # Fix 8 : préserver la sélection utilisateur entre reruns (auto_live, job polling)
-    # On stocke la dernière valeur choisie et on la reclamp si _price_ceil change.
-    # Clés préfixées par slug pour éviter les collisions entre types de vin.
-    _prev_ceil = st.session_state.get(f"_price_ceil_prev_{slug}", _price_ceil)
-    _prev_val  = st.session_state.get(f"price_range_val_{slug}", (0, _price_ceil))
-    if _price_ceil != _prev_ceil:
-        # Le max a changé (nouvelles données) : reclamp la borne haute
-        _prev_val = (max(0, _prev_val[0]), min(_prev_val[1], _price_ceil))
-        st.session_state[f"_price_ceil_prev_{slug}"] = _price_ceil
-    price_range = st.slider(
-        "💶 Prix (€)", 0, _price_ceil, _prev_val, step=1,
-        key=f"price_range_{slug}",
-    )
+    # Deux number_input pour min/max — bien plus précis qu'un slider
+    st.markdown('<div style="font-size:.8rem;font-weight:600;margin-bottom:.2rem">💶 Prix (€)</div>',
+                unsafe_allow_html=True)
+    _prev_val = st.session_state.get(f"price_range_val_{slug}", (0, _price_ceil))
+    _pc_cols  = st.columns(2)
+    with _pc_cols[0]:
+        _pmin = st.number_input("Min", min_value=0, max_value=_price_ceil,
+                                value=int(_prev_val[0]), step=1,
+                                key=f"price_min_{slug}", label_visibility="collapsed",
+                                placeholder="Min €")
+    with _pc_cols[1]:
+        _pmax = st.number_input("Max", min_value=0, max_value=_price_ceil,
+                                value=min(int(_prev_val[1]), _price_ceil), step=1,
+                                key=f"price_max_{slug}", label_visibility="collapsed",
+                                placeholder="Max €")
+    # Garantir min ≤ max
+    price_range = (min(_pmin, _pmax), max(_pmin, _pmax))
     st.session_state[f"price_range_val_{slug}"] = price_range
 
     rating_min = st.select_slider("⭐ Note min",
