@@ -743,8 +743,27 @@ def _gist_headers() -> dict:
 
 
 def _gist_is_configured() -> bool:
-    """Renvoie True si le token GitHub est présent."""
+    """Renvoie True si le token GitHub est présent (écriture)."""
     return bool(_GIST_TOKEN)
+
+def _gist_can_restore() -> bool:
+    """Renvoie True si un Gist ID est disponible (lecture publique sans token)."""
+    return bool(_GIST_ID_CFG or st.session_state.get("gist_id") or st.session_state.get("gist_restore_url"))
+
+def _gist_restore_id() -> str:
+    """Retourne l'ID Gist pour la restauration (extrait de l'URL si besoin)."""
+    import re
+    # Priorité : session gist_id > secrets > URL manuelle
+    for source in [st.session_state.get("gist_id"), _GIST_ID_CFG,
+                   st.session_state.get("gist_restore_url","")]:
+        if not source: continue
+        # Extraire l'ID depuis une URL Gist (github.com/user/ID ou gist.githubusercontent.com/user/ID/raw/...)
+        m = re.search(r"github(?:usercontent)?\.com/[^/]+/([a-f0-9]{20,})", str(source))
+        if m: return m.group(1)
+        # ID brut (32 hex chars)
+        if re.fullmatch(r"[a-f0-9]{20,40}", str(source).strip()):
+            return str(source).strip()
+    return ""
 
 
 def _gist_id() -> str:
@@ -854,19 +873,17 @@ def _gist_push_async(filename: str, content: str, force: bool = False) -> None:
 def restore_from_gist() -> int:
     """
     Restaure les fichiers depuis le Gist vers CACHE_DIR.
-    Appelé au démarrage si le filesystem local est vide.
-    Retourne le nombre de fichiers restaurés (0 si non configuré).
-    Gère la migration automatique de l'ancien vivino.json monolithique
-    vers vivino_vins-rouges.json (changement de structure v2).
+    Fonctionne sans token pour les Gists publics (lecture seule via API publique).
+    Retourne le nombre de fichiers restaurés (0 si impossible).
+    Gère la migration automatique de l'ancien vivino.json monolithique.
     """
-    if not _gist_is_configured():
-        return 0
-    # Pull brut (sans filtre _GIST_FILES) pour récupérer les anciens fichiers
-    gid = _gist_id()
+    gid = _gist_restore_id()
     if not gid:
         return 0
+    # Headers optionnels : avec token si disponible, sans sinon (Gist public)
+    headers = _gist_headers() if _gist_is_configured() else {"Accept": "application/vnd.github.v3+json"}
     try:
-        resp = requests.get(f"{_GIST_API}/{gid}", headers=_gist_headers(), timeout=20)
+        resp = requests.get(f"{_GIST_API}/{gid}", headers=headers, timeout=20)
         resp.raise_for_status()
         all_files = {
             fname: fdata.get("content", "")
@@ -1025,7 +1042,8 @@ def load_vivino_cache(slug: str = "vins-rouges") -> dict:
                     logging.warning(f"[ScoreMaster] load_vivino_cache({slug}): "
                                     f"fichier principal vide/absent, restauration depuis .bak "
                                     f"({len(bak_raw)} entrées)")
-                    bak.replace(p)   # restaure le backup comme fichier principal
+                    import shutil
+                    shutil.copy2(bak, p)  # copie (conserve .bak) plutôt que déplacer
                     _invalidate_mem_cache(p)
                     raw = bak_raw
             except Exception:
@@ -3522,8 +3540,8 @@ for k, v in [("wines",[]),("loaded_slug",None),("data_ready",False)]:
     if k not in st.session_state: st.session_state[k] = v
 
 # ── Restauration Gist au démarrage ───────────────────────────────────────
-# @st.cache_resource = exécution 1× par instance (pas à chaque rerun)
-@st.cache_resource
+# @st.cache_resource supprimé : on utilise session_state pour ne restaurer qu'1×
+# par session Streamlit, mais permettre une nouvelle tentative si l'instance redémarre.
 def _startup_restore():
     """Restaure les données depuis le Gist si des fichiers sont absents ou vides.
 
@@ -3593,11 +3611,12 @@ def _startup_restore():
     logging.warning(f"[startup] Restauration échouée pour : {still_missing}")
     return f"⚠️ {len(still_missing)} fichier(s) non restaurés — vérifiez la config Gist"
 
-# Toast affiché 1× par session uniquement (pas à chaque rerun)
-_restore_msg = _startup_restore()
-if _restore_msg and not st.session_state.get("_gist_restore_toasted"):
-    st.session_state["_gist_restore_toasted"] = True
-    st.toast(_restore_msg, icon="💾")
+# Restauration 1× par session (pas à chaque rerun)
+if not st.session_state.get("_startup_restore_done"):
+    st.session_state["_startup_restore_done"] = True
+    _restore_msg = _startup_restore()
+    if _restore_msg:
+        st.toast(_restore_msg, icon="💾")
 
 # ── SYNC DE DÉMARRAGE ─────────────────────────────────────────────────────
 # Pousse les fichiers Vivino locaux vers le Gist au démarrage de chaque
@@ -3605,28 +3624,32 @@ if _restore_msg and not st.session_state.get("_gist_restore_toasted"):
 # même si des pushes précédents ont été interrompus (daemon threads tués).
 @st.cache_resource
 def _startup_gist_sync():
-    """Synchronise les fichiers Vivino locaux → Gist au démarrage de l'instance."""
+    """Synchronise les fichiers locaux VALIDES → Gist au démarrage.
+    Ne pousse JAMAIS un fichier vide ou absent vers le Gist.
+    """
     if not _gist_is_configured():
         return
     _SLUGS = ["vins-rouges", "vins-blancs", "vins-roses", "vins-mousseux-et-petillants"]
+    pushed = 0
     for slug in _SLUGS:
-        for _path_fn in (_viv_path, _lec_path):
+        for _path_fn, _is_valid in (
+            (_viv_path,  lambda d: isinstance(d, dict) and len(d) > 0),
+            (_lec_path,  lambda d: isinstance(d, dict) and len(d.get("wines", [])) > 0),
+        ):
             p = _path_fn(slug)
-            if p.exists():
-                try:
-                    content = p.read_text("utf-8")
-                    parsed  = json.loads(content)
-                    # Vivino = dict, Leclerc = {"wines": [...]}
-                    ok = (isinstance(parsed, dict)
-                          and (len(parsed) > 0 if _path_fn is _viv_path
-                               else len(parsed.get("wines", [])) > 0))
-                    if ok:
-                        # non-daemon : survit un peu plus longtemps au recyclage Streamlit
-                        threading.Thread(
-                            target=gist_push, args=(p.name, content), daemon=False
-                        ).start()
-                except Exception:
-                    pass
+            if not p.exists():
+                continue
+            try:
+                content = p.read_text("utf-8")
+                parsed  = json.loads(content)
+                if _is_valid(parsed):   # seulement si contenu valide
+                    threading.Thread(
+                        target=gist_push, args=(p.name, content), daemon=False
+                    ).start()
+                    pushed += 1
+            except Exception:
+                pass
+    return pushed
 
 _startup_gist_sync()
 
@@ -3904,32 +3927,77 @@ with st.sidebar:
         unsafe_allow_html=True)
 
     # ── Statut persistance Gist ───────────────────────────────────────────
-    if _gist_is_configured():
-        gist_cols = st.columns([3, 1])
+    def _count_valid_local(path_fn, check):
+        n = 0
+        for s in WINE_TYPES.values():
+            p = path_fn(s)
+            if not p.exists(): continue
+            try:
+                d = json.loads(p.read_text("utf-8"))
+                if check(d): n += 1
+            except Exception: pass
+        return n
+    _n_viv_local = _count_valid_local(_viv_path, lambda d: isinstance(d, dict) and len(d) > 0)
+    _n_lec_local = _count_valid_local(_lec_path, lambda d: isinstance(d, dict) and len(d.get("wines",[])) > 0)
+    _cache_ok = _n_viv_local >= 1 or _n_lec_local >= 1
+    _can_push    = _gist_is_configured()
+    _can_restore = _gist_can_restore()
+
+    if _can_push or _can_restore:
+        _status_icon = "☁️" if _cache_ok else "⚠️"
+        _status_txt = f"Vivino: {_n_viv_local}/4 · Leclerc: {_n_lec_local}/4"
+        st.caption(f"{_status_icon} **Gist** · {_status_txt}")
+        gist_cols = st.columns(2)
         with gist_cols[0]:
-            st.caption("☁️ **Persistance Gist** : activée")
+            if _can_push:
+                if st.button("↑ Sauv.", key="btn_sync_gist", help="Sauvegarder local → Gist", width='stretch'):
+                    with st.spinner("Sauvegarde…"):
+                        ok = 0
+                        for slug_s in WINE_TYPES.values():
+                            lc_p = _lec_path(slug_s)
+                            if lc_p.exists(): ok += gist_push(lc_p.name, lc_p.read_text("utf-8"))
+                        for slug_v in WINE_TYPES.values():
+                            viv_p = _viv_path(slug_v)
+                            if viv_p.exists(): ok += gist_push(viv_p.name, viv_p.read_text("utf-8"))
+                        ph_p = _price_hist_path()
+                        if ph_p.exists(): ok += gist_push(ph_p.name, ph_p.read_text("utf-8"))
+                        rej_p = REJECTION_LOG_PATH
+                        if rej_p.exists(): ok += gist_push(rej_p.name, rej_p.read_text("utf-8"))
+                    st.toast(f"☁️ {ok} fichiers sauvegardés", icon="✅")
+            else:
+                st.caption("_(push désactivé)_")
         with gist_cols[1]:
-            if st.button("↑", key="btn_sync_gist", help="Forcer la sauvegarde vers GitHub Gist maintenant",
-                         width='stretch'):
-                with st.spinner("Synchronisation…"):
-                    ok = 0
-                    for slug_s in WINE_TYPES.values():
-                        lc_p = _lec_path(slug_s)
-                        if lc_p.exists():
-                            ok += gist_push(lc_p.name, lc_p.read_text("utf-8"))
-                    for slug_v in WINE_TYPES.values():
-                        viv_p = _viv_path(slug_v)
-                        if viv_p.exists():
-                            ok += gist_push(viv_p.name, viv_p.read_text("utf-8"))
-                    ph_p = _price_hist_path()
-                    if ph_p.exists():
-                        ok += gist_push(ph_p.name, ph_p.read_text("utf-8"))
-                    rej_p = REJECTION_LOG_PATH
-                    if rej_p.exists():
-                        ok += gist_push(rej_p.name, rej_p.read_text("utf-8"))
-                st.toast(f"☁️ {ok} fichiers sauvegardés sur Gist", icon="✅")
+            if st.button("↓ Rest.", key="btn_restore_gist", help="Restaurer Gist → local",
+                         width='stretch', disabled=not _can_restore):
+                with st.spinner("Restauration…"):
+                    n = restore_from_gist()
+                if n > 0:
+                    st.session_state.pop("_startup_restore_done", None)
+                    st.session_state["wines"] = []
+                    st.session_state["data_ready"] = False
+                    st.toast(f"✅ {n} fichier(s) restaurés depuis Gist", icon="💾")
+                    st.rerun()
+                else:
+                    st.toast("⚠️ Rien restauré — Gist vide ou inaccessible", icon="⚠️")
     else:
         st.caption("☁️ **Persistance** : non configurée")
+        # URL de secours : permet de restaurer depuis un Gist public sans token
+        _url_input = st.text_input("🔗 URL Gist (restauration d'urgence)",
+                                   placeholder="https://gist.github.com/...",
+                                   key="gist_restore_url",
+                                   help="Colle l'URL de ton Gist pour restaurer les données")
+        if _url_input:
+            if st.button("↓ Restaurer depuis cette URL", key="btn_restore_url"):
+                with st.spinner("Restauration…"):
+                    n = restore_from_gist()
+                if n > 0:
+                    st.session_state.pop("_startup_restore_done", None)
+                    st.session_state["wines"] = []
+                    st.session_state["data_ready"] = False
+                    st.toast(f"✅ {n} fichier(s) restaurés", icon="💾")
+                    st.rerun()
+                else:
+                    st.toast("⚠️ Impossible de restaurer — URL invalide ou Gist vide", icon="⚠️")
         with st.expander("ℹ️ Configurer la persistance"):
             st.markdown("""
 **Tes données sont perdues quand l'app se met en veille.**
