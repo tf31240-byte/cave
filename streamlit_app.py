@@ -451,7 +451,7 @@ div[class*="st-key-bad_viv_"]{
   justify-content:flex-end !important;
   margin-top:-2.4rem !important;
   margin-bottom:.35rem !important;
-  padding-right:.5rem !important;
+  padding-right:0 !important;
   pointer-events:none !important;
   position:relative !important;
   z-index:10 !important}
