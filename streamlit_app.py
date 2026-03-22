@@ -357,6 +357,7 @@ footer{display:none !important}
 .b-grape{background:rgba(109,40,217,.05);color:#5b21b6;border-color:rgba(109,40,217,.15)}
 .b-style{background:rgba(8,145,178,.05);color:#0e7490;border-color:rgba(8,145,178,.15)}
 .b-vol  {background:rgba(180,83,9,.06);color:#92400e;border-color:rgba(180,83,9,.15)}
+.b-new  {background:rgba(22,163,74,.08);color:#166534;border-color:rgba(22,163,74,.22)}
 
 /* ── Note (col 3) ── */
 .wine-rating{text-align:center}
@@ -647,6 +648,7 @@ div[class*="st-key-bad_viv_"] button:hover{
   .badge.b-reg  {background:#1A1438;color:#c4b5fd;border-color:rgba(196,181,253,.2)}
   .badge.b-top  {background:#38101E;color:#fda4af;border-color:rgba(253,164,175,.2)}
   .badge.b-stale{background:#20202E;color:#9ca3af;border-color:rgba(156,163,175,.16)}
+  .badge.b-new  {background:rgba(22,163,74,.12);color:#86efac;border-color:rgba(22,163,74,.25)}
   .badge.b-nat  {background:#0E2014;color:#86efac;border-color:rgba(134,239,172,.18)}
   .badge.b-grape{background:#160A2C;color:#c4b5fd;border-color:rgba(196,181,253,.18)}
   .badge.b-style{background:#081C26;color:#67e8f9;border-color:rgba(103,232,249,.16)}
@@ -1657,6 +1659,8 @@ def _merge_vivino(wines: list, vc: dict, ph: dict | None = None) -> list:
             for f in _VIVINO_FIELDS:
                 if f in cv:
                     w[f] = cv[f]
+            if cv.get("cached_at"):   # propagé pour le badge "Nouveau"
+                w["cached_at"] = cv["cached_at"]
         # Defaults pour les champs manquants
         for f in _VIVINO_FIELDS:
             if f not in w:
@@ -3361,6 +3365,9 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
     rating = wine.get("rating")
     badges = ""
     if rating and rating >= 4.3:             badges += '<span class="badge b-top">★ Top noté</span>'
+    _cached_at = wine.get("cached_at") or 0
+    if _cached_at and (time.time() - _cached_at) < 1209600:  # < 2 semaines
+        badges += '<span class="badge b-new">✨ Nouveau</span>'
     if safe_reg:                             badges += f'<span class="badge b-reg">{safe_reg}</span>'
     if wine.get("_stale"):                   badges += f'<span class="badge b-stale">⏳ obsolète</span>'
     if wine.get("is_natural"):               badges += '<span class="badge b-nat">🌿 Naturel</span>'
