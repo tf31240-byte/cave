@@ -1,89 +1,95 @@
 # 🍷 Cave Leclerc Blagnac × Vivino
 
-Comparateur de vins rouges disponibles chez **Leclerc Blagnac** enrichis avec les notes **Vivino**.  
-Classe automatiquement les vins par **ratio qualité/prix** (note Vivino ÷ prix × 10).
+Comparateur des vins en rayon chez **Leclerc Blagnac** (magasin 1431), enrichis avec les notes
+et le nombre d'avis **Vivino**, classés par un **score qualité / prix**.
+
+Application [Streamlit](https://streamlit.io) : le catalogue Leclerc est lu avec Selenium
+(Chromium headless), les notes Vivino via leur API puis, en repli, par navigation.
+Tout est mis en cache sur disque : l'app s'ouvre instantanément et un scraping interrompu peut
+être repris.
 
 ---
 
-## ⚡ Installation rapide
+## ⚡ Installation
 
 ```bash
-# 1. Installer les dépendances Python
 pip install -r requirements.txt
+# Chromium + chromedriver (Debian/Ubuntu) — déjà listés dans packages.txt pour Streamlit Cloud
+sudo apt install chromium chromium-driver
 
-# 2. Installer Chromium pour Playwright
-playwright install chromium
-
-# 3. Lancer le serveur
-python app.py
+streamlit run streamlit_app.py
 ```
 
-Puis ouvrir **http://localhost:5000** dans votre navigateur.
+Au premier lancement, ouvrir le menu latéral et cliquer sur **🔄 Mettre à jour le catalogue**,
+puis **🍷 Rafraîchir les notes Vivino**. Les données sont ensuite conservées dans `.cache/`.
+
+> Streamlit **≥ 1.50** est requis (paramètre `width="stretch"` des boutons, tableaux et graphiques).
 
 ---
 
-## 📖 Comment ça marche
+## 🔐 Sauvegarde Gist (facultative)
 
-### 1. Scraping Leclerc (Playwright)
-- Playwright lance un **navigateur Chromium headless** et navigue vers la page Leclerc
-- L'URL `?oaf-sign-code=1431` filtre automatiquement sur le **magasin de Blagnac**
-- Le navigateur exécute le JavaScript Angular et **intercepte les réponses API** du catalogue
-- Si l'API n'est pas interceptée, fallback sur le **scraping DOM** des cartes produits
+Sur un hébergement dont le disque est éphémère (Streamlit Community Cloud), les caches peuvent
+être sauvegardés dans un **Gist GitHub privé**. Sans configuration, l'app fonctionne normalement
+et garde simplement ses données en local.
 
-### 2. Enrichissement Vivino
-- Pour chaque vin, une requête est faite à l'**API Vivino** (endpoint public)
-- On récupère : note moyenne, nombre d'avis, URL Vivino
-- Un délai de 300ms entre chaque requête pour respecter le rate limit
+1. Copier `.streamlit/secrets.toml.example` en `.streamlit/secrets.toml` (ignoré par git).
+2. Renseigner `github_token` (scope `gist`). Laisser `gist_id` vide au premier lancement, puis
+   y recopier l'identifiant du Gist créé automatiquement.
 
-### 3. Calcul du ratio
-```
-ratio = (note_vivino / prix_en_euros) × 10
-```
-Plus le ratio est élevé, meilleur est le rapport qualité/prix.  
-Exemple : un vin à 3.9★ pour 8€ a un ratio de 4.88, bien meilleur qu'un 4.2★ à 45€ (ratio 0.93).
+Sur Streamlit Cloud, coller le même contenu dans *Settings → Secrets*.
+**Ne jamais commiter `secrets.toml`.**
 
 ---
 
-## 🔧 Configuration
+## 🧮 Score
 
-Dans `app.py`, vous pouvez modifier :
-- `STORE_CODE = "1431"` — code du magasin Leclerc
-- `max_pages` dans `scrape_leclerc_wines()` — nombre de pages à scraper
+`score = note × confiance(nb d'avis) / log(1 + prix) × 4`, avec un petit bonus si le millésime
+Vivino correspond à celui de Leclerc. Une note dont le nombre d'avis est inconnu reçoit une
+confiance de 0,2 (≈ 400 avis) : elle reste derrière les vins bien documentés. Le `log(1 + prix)` évite qu'un vin à 4 € écrase
+systématiquement un excellent vin à 25 € (explication détaillée dans `compute_score`).
+
+---
+
+## ⚡ Rapidité du scraping
+
+- Chromium charge en mode `eager`, sans images ni polices (on ne lit que du texte / JSON-LD).
+- Pauses fixes réduites : on n'attend plus qu'un élément précis (carte produit, JSON-LD).
+- Vin dont l'URL Vivino est déjà connue mais sans note : lecture directe de la page du vin
+  (1 navigation au lieu de 2).
+- Un rafraîchissement ignore les vins déjà notés et non obsolètes (> 30 jours).
+- Chaque navigateur est réutilisé pour tout son lot ; le journal affiche le temps par vin (`⏱️`).
+- Le nombre de navigateurs parallèles (`_VIVINO_SEL_WORKERS`, 3 par défaut) peut être augmenté,
+  mais Vivino répond par des 429/403 si on va trop vite.
+
+---
+
+## 🧪 Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests -q
+```
+
+Les tests n'utilisent ni réseau ni navigateur : fonctions pures (score, régions, requêtes Vivino,
+fusion des caches) et rendu complet de l'interface (`streamlit.testing`) sur un catalogue
+fictif. Ils tournent aussi sur GitHub Actions à chaque push.
 
 ---
 
 ## 🗂 Structure
 
 ```
-cave-leclerc/
-├── app.py                 # Backend Flask + scraper + API Vivino
-├── templates/
-│   └── index.html         # Interface web
-├── requirements.txt
-└── README.md
+├── streamlit_app.py            # Application (scraping, caches, score, interface)
+├── requirements.txt            # Dépendances d'exécution
+├── requirements-dev.txt        # + pytest
+├── packages.txt                # Paquets système (Chromium) pour Streamlit Cloud
+├── tests/                      # Suite pytest
+├── .streamlit/secrets.toml.example
+├── .github/workflows/tests.yml # CI
+├── leclerc_vins-rouges.json    # Export de départ (ancien format de cache)
+└── app.py, index.html          # Ancienne version Flask/Playwright (historique, non utilisée)
 ```
 
----
-
-## ⚠️ Notes importantes
-
-- Le scraping peut échouer si Leclerc change sa structure HTML → ouvrir une issue
-- En cas d'échec, l'app affiche des **données de démonstration** pour tester l'interface
-- Les données sont **mises en cache** en mémoire jusqu'au clic sur "Rafraîchir"
-- Vivino peut limiter les requêtes : en cas de 429, attendre quelques minutes
-
----
-
-## 🆚 Fonctionnalités
-
-| Feature | Statut |
-|---------|--------|
-| Scraping Leclerc Blagnac | ✅ |
-| Notes Vivino automatiques | ✅ |
-| Classement ratio ★/€ | ✅ |
-| Filtres prix / note / recherche | ✅ |
-| Tri multi-critères | ✅ |
-| Cache en mémoire | ✅ |
-| Vins blancs / rosés | 🔜 |
-| Export CSV | 🔜 |
-| Historique des prix | 🔜 |
+Le dossier `.cache/` (catalogues, notes Vivino, historique des prix, état du scraping) est généré
+à l'exécution et ignoré par git.
