@@ -249,11 +249,22 @@ def test_make_driver_loads_fast(ns, monkeypatch):
     import selenium.webdriver as wd
     captured = {}
     monkeypatch.setattr(wd, "Chrome", lambda *a, **k: captured.setdefault("opts", k["options"]))
-    ns["make_driver"]()
+    ns["make_driver"](fast=True)
     o = captured["opts"]
     assert o.page_load_strategy == "eager"
     prefs = o.experimental_options["prefs"]
     assert prefs["profile.managed_default_content_settings.images"] == 2
+
+
+def test_make_driver_default_is_unchanged_for_leclerc(ns, monkeypatch):
+    """Leclerc garde le chargement normal (images comprises)."""
+    import selenium.webdriver as wd
+    captured = {}
+    monkeypatch.setattr(wd, "Chrome", lambda *a, **k: captured.setdefault("opts", k["options"]))
+    ns["make_driver"]()
+    o = captured["opts"]
+    assert o.page_load_strategy == "normal"
+    assert "prefs" not in o.experimental_options
 
 
 def test_refresh_skips_wines_with_fresh_rating(ns, monkeypatch):

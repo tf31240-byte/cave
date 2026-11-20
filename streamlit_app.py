@@ -2585,7 +2585,7 @@ def parse_wine_jsonld(html: str) -> dict:
 # SELENIUM
 # ═══════════════════════════════════════════════════════════════════════════
 
-def make_driver():
+def make_driver(fast: bool = False):
     """
     ③ CORRIGÉ (indirectement) : les appelants initialisent désormais
     driver = None avant d'appeler make_driver(), ce qui évite le NameError
@@ -2605,15 +2605,15 @@ def make_driver():
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
-    # Rapidité : ne pas attendre images/CSS/polices (on ne lit que du texte et du JSON-LD).
-    # "eager" rend la main dès que le DOM est prêt ; les éléments attendus sont
-    # ensuite guettés explicitement par WebDriverWait.
-    opts.page_load_strategy = "eager"
-    opts.add_experimental_option("prefs", {
-        "profile.managed_default_content_settings.images": 2,
-        "profile.managed_default_content_settings.fonts": 2,
-    })
-    opts.add_argument("--blink-settings=imagesEnabled=false")
+    if fast:
+        # Rapidité (Vivino uniquement) : pas d'images ni de polices, chargement « eager ».
+        # Leclerc garde le mode normal : son catalogue Angular/anti-bot est plus fragile.
+        opts.page_load_strategy = "eager"
+        opts.add_experimental_option("prefs", {
+            "profile.managed_default_content_settings.images": 2,
+            "profile.managed_default_content_settings.fonts": 2,
+        })
+        opts.add_argument("--blink-settings=imagesEnabled=false")
     for b in ["/usr/bin/chromium","/usr/bin/chromium-browser",
               "/usr/bin/google-chrome","/usr/bin/google-chrome-stable"]:
         if os.path.exists(b): opts.binary_location = b; break
@@ -2675,7 +2675,7 @@ def _scrape_all_leclerc_pages(driver, slug: str, log=None) -> list:
             waited = True
         except Exception:
             pass
-        time.sleep(0.3 if waited else 2.0)   # minimal si l'élément est là, plus long sinon
+        time.sleep(0.8 if waited else 2.5)   # court si déjà chargé, long sinon
         html = driver.page_source
         if p == 1:
             cards, nb_pages = parse_page(html)
@@ -3061,7 +3061,7 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
         """Un worker scrape son chunk avec son propre driver Chrome."""
         _drv = None
         try:
-            _drv = make_driver()
+            _drv = make_driver(fast=True)
             for key, wine, region in chunk:
                 try:
                     _ku = vc.get(_key_of[id(wine)], {})
