@@ -30,7 +30,6 @@ CORRECTIFS PRÉCÉDENTS (v3-v4) : voir historique git.
 """
 
 import re, json, time, math, unicodedata, threading, html as _html
-import concurrent.futures
 from functools import lru_cache
 import streamlit as st
 import requests
@@ -118,9 +117,9 @@ _SESSION = _make_session()
 
 # ── Backoff 429/403 Vivino (partagé entre tous les threads Phase 1) ─────────
 _vivino_429_until: float = 0.0
-_vivino_429_lock  = __import__("threading").Lock()
+_vivino_429_lock  = threading.Lock()
 _vivino_403_count: int   = 0    # nombre de 403 depuis le début de cette session API
-_vivino_403_lock  = __import__("threading").Lock()
+_vivino_403_lock  = threading.Lock()
 _VIVINO_403_ABORT = 10          # abandonner Phase 1 si ≥ N 403 consécutifs
 
 def _vivino_inc_403() -> int:
@@ -715,7 +714,10 @@ div[class*="st-key-bad_viv_"] button:hover{
 # ─────────────────────────────────────────────────────────────────────────
 
 _GIST_API  = "https://api.github.com/gists"
-_GIST_CONF = st.secrets.get("gist", {})
+try:
+    _GIST_CONF = dict(st.secrets.get("gist", {}))
+except Exception:   # pas de secrets.toml (installation locale) → Gist facultatif désactivé
+    _GIST_CONF = {}
 _GIST_TOKEN   = _GIST_CONF.get("github_token", "")
 _GIST_ID_CFG  = _GIST_CONF.get("gist_id", "")
 
@@ -856,7 +858,8 @@ _gist_push_lock = threading.Lock()       # protection accès concurrent
 _GIST_PUSH_MIN_INTERVAL = 60.0           # 1 push/min max par fichier (throttle scraping)
 
 def _gist_push_async(filename: str, content: str, force: bool = False) -> None:
-    """Push non-bloquant throttlé : max 1 push par fichier toutes les 5s.
+    """Push non-bloquant throttlé : max 1 push par fichier toutes les 60 s
+    (_GIST_PUSH_MIN_INTERVAL).
     Évite la saturation de threads lors des sauvegardes incrémentielles du scraping.
     force=True : bypasse le throttle (fin de scraping, correction manuelle).
     daemon=False : le thread survit un peu plus longtemps si Streamlit recycle."""
