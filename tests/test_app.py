@@ -193,3 +193,84 @@ def test_sort_buttons_filters_and_wine_types(app_test):
         box.select(option)
         at.run()
         assert not at.exception, (option, [e.value for e in at.exception])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Scraping : rapidité (sans réseau ni navigateur)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _FakeDriver:
+    current_url = "https://www.vivino.com/w/1?year=2019"
+    page_source = ""
+
+    def __init__(self):
+        self.gets = []
+
+    def get(self, url):
+        self.gets.append(url)
+
+
+@pytest.fixture()
+def no_selenium_wait(monkeypatch):
+    """WebDriverWait factice : échoue aussitôt (évite d'attendre 8 s sur un faux driver)."""
+    import selenium.webdriver.support.ui as ui
+
+    class _W:
+        def __init__(self, *a, **k): pass
+        def until(self, *a, **k): raise TimeoutError
+
+    monkeypatch.setattr(ui, "WebDriverWait", _W)
+
+
+def test_fetch_vivino_known_url_skips_search(ns, monkeypatch):
+    """URL déjà connue (« URL trouvée » sans note) : une seule navigation, pas de recherche."""
+    monkeypatch.setitem(ns, "_fetch_wine_page", lambda drv, url: {
+        "rating": 4.1, "ratings_count": 321, "_final_url": url + "?year=2019"})
+    drv = _FakeDriver()
+    r = ns["fetch_vivino"](drv, "Château Test Bordeaux", 2019,
+                           known_url="https://www.vivino.com/w/1")
+    assert drv.gets == []                      # la recherche n'a pas été ouverte
+    assert r["rating"] == 4.1 and r["ratings_count"] == 321
+    assert r["vivino_url"] == "https://www.vivino.com/w/1"
+    assert r["vivino_year"] == 2019 and r["vintage_match"] is True
+
+
+def test_fetch_vivino_known_url_without_rating_falls_back_to_search(ns, monkeypatch, no_selenium_wait):
+    monkeypatch.setitem(ns, "_fetch_wine_page", lambda drv, url: {})
+    drv = _FakeDriver()
+    r = ns["fetch_vivino"](drv, "Château Test Bordeaux", 2019,
+                           known_url="https://www.vivino.com/w/1")
+    assert any("/search/wines" in u for u in drv.gets)   # repli sur la recherche classique
+    assert r["rating"] is None
+
+
+def test_make_driver_loads_fast(ns, monkeypatch):
+    """Chargement « eager » + images/polices bloquées."""
+    import selenium.webdriver as wd
+    captured = {}
+    monkeypatch.setattr(wd, "Chrome", lambda *a, **k: captured.setdefault("opts", k["options"]))
+    ns["make_driver"]()
+    o = captured["opts"]
+    assert o.page_load_strategy == "eager"
+    prefs = o.experimental_options["prefs"]
+    assert prefs["profile.managed_default_content_settings.images"] == 2
+
+
+def test_refresh_skips_wines_with_fresh_rating(ns, monkeypatch):
+    """Régression : _is_fresh ne ménageait jamais aucun vin (locked=False y était lu comme
+    « verrouillé ») → un rafraîchissement refaisait tout."""
+    seen = {}
+    monkeypatch.setitem(ns, "_scrape_vivino_list",
+                        lambda slug, wines, todo, vc, log: seen.setdefault("todo", todo))
+    ns["run_refresh_vivino"]("vins-rouges")
+    vc = ns["load_vivino_cache"]("vins-rouges")
+    todo_names = {w["name"] for w in seen["todo"]}
+    fresh = {k for k, e in vc.items() if e.get("rating") and not e.get("_stale")}
+    lc = ns["load_leclerc_cache"]("vins-rouges")["wines"]
+    for w in lc:
+        key = ns["build_query"](w["name"])
+        if key in fresh:
+            assert w["name"] not in todo_names
+        else:
+            assert w["name"] in todo_names
+    assert 0 < len(todo_names) < len(lc)

@@ -51,6 +51,19 @@ systématiquement un excellent vin à 25 € (explication détaillée dans `comp
 
 ---
 
+## ⚡ Rapidité du scraping
+
+- Chromium charge en mode `eager`, sans images ni polices (on ne lit que du texte / JSON-LD).
+- Pauses fixes réduites : on n'attend plus qu'un élément précis (carte produit, JSON-LD).
+- Vin dont l'URL Vivino est déjà connue mais sans note : lecture directe de la page du vin
+  (1 navigation au lieu de 2).
+- Un rafraîchissement ignore les vins déjà notés et non obsolètes (> 30 jours).
+- Chaque navigateur est réutilisé pour tout son lot ; le journal affiche le temps par vin (`⏱️`).
+- Le nombre de navigateurs parallèles (`_VIVINO_SEL_WORKERS`, 3 par défaut) peut être augmenté,
+  mais Vivino répond par des 429/403 si on va trop vite.
+
+---
+
 ## 🧪 Tests
 
 ```bash

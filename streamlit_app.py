@@ -2605,6 +2605,15 @@ def make_driver():
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
+    # Rapidité : ne pas attendre images/CSS/polices (on ne lit que du texte et du JSON-LD).
+    # "eager" rend la main dès que le DOM est prêt ; les éléments attendus sont
+    # ensuite guettés explicitement par WebDriverWait.
+    opts.page_load_strategy = "eager"
+    opts.add_experimental_option("prefs", {
+        "profile.managed_default_content_settings.images": 2,
+        "profile.managed_default_content_settings.fonts": 2,
+    })
+    opts.add_argument("--blink-settings=imagesEnabled=false")
     for b in ["/usr/bin/chromium","/usr/bin/chromium-browser",
               "/usr/bin/google-chrome","/usr/bin/google-chrome-stable"]:
         if os.path.exists(b): opts.binary_location = b; break
@@ -2666,7 +2675,7 @@ def _scrape_all_leclerc_pages(driver, slug: str, log=None) -> list:
             waited = True
         except Exception:
             pass
-        time.sleep(0.8 if waited else 2.5)   # court si déjà chargé, long sinon
+        time.sleep(0.3 if waited else 2.0)   # minimal si l'élément est là, plus long sinon
         html = driver.page_source
         if p == 1:
             cards, nb_pages = parse_page(html)
@@ -2751,7 +2760,30 @@ def check_availability(slug: str, cached_wines: list, log=None) -> list:
     if log: log(f"✅ {nok} dispo · {len(result)-nok} indispo · {n_price_updated} prix mis à jour")
     return result
 
-def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", region: str = "") -> dict:
+def _fetch_wine_page(driver, url: str) -> dict:
+    """Ouvre une page vin Vivino et lit note + nb d'avis (JSON-LD). {} en cas d'échec."""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    try:
+        driver.get(url)
+        waited = False
+        try:
+            WebDriverWait(driver, 8).until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "script[type='application/ld+json']")))
+            waited = True
+        except Exception:
+            pass
+        time.sleep(0.15 if waited else 1.2)
+        d = parse_wine_jsonld(driver.page_source) or {}
+        d["_final_url"] = driver.current_url
+        return d
+    except Exception:
+        return {}
+
+
+def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", region: str = "",
+                 known_url: str = "") -> dict:
     """
     2 navigations avec choix du meilleur candidat (nom + millésime + région).
 
@@ -2777,6 +2809,24 @@ def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", reg
     best, confidence = None, 0.0
     tried_sel = {sel_query}
 
+    # Raccourci : URL Vivino déjà connue (ex. « URL trouvée » sans note) → on saute
+    # la recherche et on lit directement la page du vin (1 navigation au lieu de 2).
+    if known_url:
+        d = _fetch_wine_page(driver, known_url)
+        if d.get("rating"):
+            vy = None
+            m = _VIVINO_YEAR_URL_RE.search(d.get("_final_url") or known_url)
+            if m: vy = _safe_year(m.group(1))
+            vmatch = (vintage == vy) if (vintage and vy) else (True if not vintage else None)
+            return {"ratings_count_all": 0, "vivino_name": "", "winery": "",
+                    "vivino_region": "", "vivino_region_seo": "", "country": "",
+                    "grapes": [], "style_name": "", "is_natural": False,
+                    "acidity": None, "tannin": None, "sweetness": None, "body": None,
+                    "rating": d["rating"], "ratings_count": d["ratings_count"],
+                    "vivino_url": known_url, "vivino_year": vy, "vintage_match": vmatch,
+                    "match_confidence": 0.9}
+        # sinon : retomber sur la recherche classique
+
     def _selenium_search(q):
         """Effectue une recherche Selenium et retourne (best, confidence)."""
         try:
@@ -2784,13 +2834,13 @@ def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", reg
                        f"?q={requests.utils.quote(q)}&language=fr")
             _sel_waited = False
             try:
-                WebDriverWait(driver, 9).until(
+                WebDriverWait(driver, 8).until(
                     EC.presence_of_element_located(
                         (By.CSS_SELECTOR,
                          "[class*='wineCard'],[class*='wine-card'],[class*='averageValue'],[href*='/w/']")))
                 _sel_waited = True
             except Exception: pass
-            time.sleep(0.5 if _sel_waited else 1.5)
+            time.sleep(0.15 if _sel_waited else 1.2)
             cands = vivino_candidates_from_search(driver.page_source)
             return choose_best_vivino_candidate(query, vintage, cands, region=region,
                                                 grapes_hint=_gh, slug=slug)
@@ -2853,7 +2903,7 @@ def fetch_vivino(driver, wine_name: str, vintage, slug: str = "vins-rouges", reg
                     (By.CSS_SELECTOR, "script[type='application/ld+json']")))
             _wine_waited = True
         except Exception: pass
-        time.sleep(0.5 if _wine_waited else 1.5)
+        time.sleep(0.15 if _wine_waited else 1.2)
         d = parse_wine_jsonld(driver.page_source)
         # Affiner le millésime depuis l'URL de la page wine (plus fiable que le titre)
         m = _VIVINO_YEAR_URL_RE.search(driver.current_url)
@@ -2981,6 +3031,7 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
 
     n_w = min(_VIVINO_SEL_WORKERS, len(need_selenium))
     if log: log(f"🌐 Selenium ×{n_w} workers — {len(need_selenium)} vins…")
+    _t0 = time.time()
 
     # _results : key → vd (écrit par workers, lu par thread principal)
     # Thread-safe : workers n'écrivent que dans _results (protégé par lock),
@@ -3013,8 +3064,10 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
             _drv = make_driver()
             for key, wine, region in chunk:
                 try:
+                    _ku = vc.get(_key_of[id(wine)], {})
+                    _ku = _ku.get("vivino_url", "") if not _ku.get("rating") else ""
                     vd = fetch_vivino(_drv, wine["name"], wine.get("vintage"),
-                                      slug=slug, region=region)
+                                      slug=slug, region=region, known_url=_ku)
                 except Exception:
                     vd = {"rating": None, "ratings_count": 0, "vivino_url": "",
                           "vivino_year": None, "vintage_match": None, "match_confidence": 0.0}
@@ -3118,6 +3171,10 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
         else:
             ckpt_finish(slug)
             if log: log(f"✅ Terminé — {found} notes · {len(vc)} entrées cache")
+        if log and _processed:
+            _el = time.time() - _t0
+            log(f"⏱️ {_el:.0f} s pour {len(_processed)} vins · {_el/len(_processed):.1f} s/vin "
+                f"({n_w} navigateurs)")
 
 
 
@@ -3234,8 +3291,7 @@ def run_refresh_vivino(slug: str, resume: bool = False, log=None) -> list:
     # pour ne pas écraser de bonnes données lors d'un rafraîchissement partiel.
     def _is_fresh(w):
         e = vc.get(build_query(w["name"]), {})
-        return (e.get("rating") and not e.get("_stale") and not e.get("locked") is False
-                and not e.get("suppressed"))
+        return bool(e.get("rating")) and not e.get("_stale") and not e.get("suppressed")
     # Note : si done_eans vide (nouveau scrape) on respecte quand même les données fraîches
     if not done_eans:
         already_good = [w for w in todo if _is_fresh(w)]
