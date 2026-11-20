@@ -239,6 +239,11 @@ footer{display:none !important}
 [data-testid="stSidebar"] hr{border-color:rgba(201,168,76,.18) !important;margin:.7rem 0 !important}
 [data-testid="stSidebar"] .stCaption{color:#A88090 !important}
 [data-testid="stSidebar"] .stCaption strong{color:#E8D0D5 !important}
+/* Champs de saisie : fond clair → texte foncé. La règle « * » plus haut rendait le texte
+   rose clair sur fond clair (contraste 1.28:1, illisible) pour Prix min/max, Recherche, etc. */
+[data-testid="stSidebar"] input,
+[data-testid="stSidebar"] textarea{
+  color:#1A0810 !important;-webkit-text-fill-color:#1A0810 !important}
 
 /* ═══════════════ EN-TÊTE PAGE ═══════════════ */
 .main-title{
