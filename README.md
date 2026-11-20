@@ -45,7 +45,8 @@ Sur Streamlit Cloud, coller le même contenu dans *Settings → Secrets*.
 ## 🧮 Score
 
 `score = note × confiance(nb d'avis) / log(1 + prix) × 4`, avec un petit bonus si le millésime
-Vivino correspond à celui de Leclerc. Le `log(1 + prix)` évite qu'un vin à 4 € écrase
+Vivino correspond à celui de Leclerc. Une note dont le nombre d'avis est inconnu reçoit une
+confiance de 0,2 (≈ 400 avis) : elle reste derrière les vins bien documentés. Le `log(1 + prix)` évite qu'un vin à 4 € écrase
 systématiquement un excellent vin à 25 € (explication détaillée dans `compute_score`).
 
 ---

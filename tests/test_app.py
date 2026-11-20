@@ -37,12 +37,13 @@ def test_score_vintage_bonus(ns):
     assert cs(4.0, 5000, 10, False) == cs(4.0, 5000, 10, None)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Connu : un vin dont le nombre d'avis est inconnu (0) reçoit une confiance de 0.5 et "
-    "passe devant un vin à 400 ou 1000 avis (confiance 0.2 / 0.32). À arbitrer par le propriétaire."))
 def test_score_unknown_count_does_not_beat_known_reviews(ns):
+    """Régression : un nombre d'avis inconnu (0) valait confiance 0.5 (≈ 2 500 avis) et
+    doublait un vin à 1 000 avis confirmés."""
     cs = ns["compute_score"]
     assert cs(4.0, 0, 10) <= cs(4.0, 1000, 10)
+    assert cs(4.0, 0, 10) == cs(4.0, None, 10)          # 0 et None = inconnu
+    assert cs(4.0, 0, 10) > cs(4.0, 1, 10)              # mais mieux qu'un seul avis
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -101,12 +102,31 @@ def test_build_query_never_empty_and_stable(ns):
         assert bq(name) == q   # déterministe (clé de cache Vivino)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Connu : l'étape 8 de build_query retire « Rhône » en fin de nom et laisse « Côtes du » "
-    "(article orphelin). Corriger change les clés du cache Vivino de ces vins → à valider."))
-def test_build_query_has_no_dangling_preposition(ns):
-    q = ns["build_query"]("Magnum E.Guigal Côtes du Rhône 2019")
-    assert not q.endswith((" du", " de", " des"))
+@pytest.mark.parametrize("name, expected", [
+    ("M. Chapoutier Côtes du Rhône", "M. Chapoutier Côtes du Rhône"),
+    ("Chateau De Ruth Côtes du Rhône", "Chateau De Ruth Côtes du Rhône"),
+    ("Château Latour Camblanes Cadillac Côtes de Bordeaux", "Château Latour Camblanes Cadillac Côtes de Bordeaux"),
+    ("Berne Grande Récolte Côtes de Provence", "Berne Grande Récolte Côtes de Provence"),
+])
+def test_build_query_keeps_compound_appellations(ns, name, expected):
+    """Régression : l'étape « appellation générique en fin de query » laissait « Côtes du »."""
+    assert ns["build_query"](name) == expected
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("Château Dutruch Grand Poujeaux Moulis Bordeaux", "Château Dutruch Grand Poujeaux Moulis"),
+    ("Domaine Test Les Terrasses Languedoc", "Domaine Test Les Terrasses"),
+])
+def test_build_query_still_strips_plain_generic_tail(ns, name, expected):
+    """La garde ne doit pas désactiver le cas normal : « Bordeaux »/« Languedoc » en fin de nom."""
+    assert ns["build_query"](name) == expected
+
+
+def test_build_query_never_ends_with_dangling_word(ns):
+    bq = ns["build_query"]
+    for name in ["Magnum E.Guigal Côtes du Rhône 2019", "Dourthe La Bordeaux",
+                 "Le Fruit Défendu du Château Lamour Sans Sulfites Ajoutés Castillon Côtes de Bordeaux"]:
+        assert not bq(name).lower().endswith((" du", " de", " des", " la", " le", " les", " aux", " au")), name
 
 
 @pytest.mark.parametrize("query, target, expected", [

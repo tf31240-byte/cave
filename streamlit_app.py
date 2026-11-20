@@ -1490,6 +1490,8 @@ def price_trend(ean: str, current_price: float, ph: dict) -> str:
 # SCORE COMPOSITE
 # ═══════════════════════════════════════════════════════════════════════════
 
+_CONF_UNKNOWN_COUNT = 0.2   # confiance attribuée à une note dont le nombre d'avis est inconnu
+
 def compute_score(rating, ratings_count, price, vintage_match=None) -> float:
     """
     Score qualité/prix composite.
@@ -1508,12 +1510,15 @@ def compute_score(rating, ratings_count, price, vintage_match=None) -> float:
     boosté pour favoriser les vins dont la note est certifiée sur le bon
     millésime (plutôt qu'une note de millésime approché).
 
-    ⑧ Fallback confiance ×0.5 si ratings_count=0 (inchangé depuis v4).
+    Nombre d'avis inconnu (0) : confiance fixée à _CONF_UNKNOWN_COUNT (0.2, soit
+    l'équivalent d'environ 400 avis). Avant, la valeur était 0.5 (≈ 2 500 avis) : un vin
+    dont on ne connaissait pas le nombre d'avis passait devant un vin à 1 000 avis
+    confirmés. Il reste désormais derrière les vins bien documentés.
     """
     if rating is None or not price or price <= 0:
         return 0.0
     cnt = ratings_count or 0
-    confidence = min(1.0, math.sqrt(cnt) / 100) if cnt > 0 else 0.5
+    confidence = min(1.0, math.sqrt(cnt) / 100) if cnt > 0 else _CONF_UNKNOWN_COUNT
     base = rating * confidence / math.log1p(price) * 4
     if vintage_match is True:
         base *= 1.05   # +5% si millésime confirmé
@@ -2062,11 +2067,15 @@ def build_query(wine_name: str) -> str:
 
     # Étape 8 : supprimer les appellations génériques en fin de query
     # (seulement si elles ne sont pas le cœur du nom)
+    # Garde : ne pas couper si l'appellation fait partie d'un nom composé
+    # (« Côtes du Rhône », « Côtes de Bordeaux ») — sinon il resterait « Côtes du ».
     words = nom.split()
     if len(words) > 2:
         tail = _norm_ascii(words[-1])
         if tail in _GENERIC_APPELLATIONS:
-            nom = " ".join(words[:-1]).strip()
+            candidate = " ".join(words[:-1]).strip()
+            if _clean_tail(candidate) == candidate:   # pas de préposition orpheline
+                nom = candidate
 
     # Étape 9 : résolution d'alias
     nom_key = _norm_ascii(nom)
