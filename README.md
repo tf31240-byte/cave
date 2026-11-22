@@ -77,18 +77,47 @@ fictif. Ils tournent aussi sur GitHub Actions à chaque push.
 
 ---
 
+## 🖥️ Interface
+
+Trois écrans, choisis dans la barre latérale :
+
+| Écran | Rôle |
+|---|---|
+| 🏅 **Classement** | Recherche, tri et filtres en haut ; vues *Liste*, *Bonnes affaires*, *Statistiques*, *Tableau & export*. Sous chaque vin, « 🚫 Ce n'est pas le bon vin sur Vivino ? » écarte un lien erroné. |
+| 🔄 **Mise à jour** | Étape 1 : catalogue Leclerc. Étape 2 : notes Vivino (*Compléter les manquants*, *Rafraîchir les obsolètes*, *Tout refaire*). Un scraping interrompu se **reprend** là où il s'est arrêté ; journal en direct. |
+| ⚙️ **Réglages** | Sauvegarde Gist, correction manuelle d'une note, liens rejetés, cache Vivino. |
+
+Les données déjà acquises (`.cache/`) sont conservées et reprises telles quelles.
+
+## 🔎 Détection des vins sur Vivino
+
+- Titre de carte nettoyé (notes, nombre d'avis et prix retirés) et comparé aussi au *slug* de l'URL.
+- Millésime lu dans l'URL (`?year=`), abréviations développées (`St-Émilion`, `Ch.`, `Dom.`).
+- Jusqu'à 3 recherches par vin ; on garde la **meilleure** correspondance, pas la première.
+- Correspondance peu sûre (< 0,60) : badge « 🔎 À vérifier » sur la carte.
+
+---
+
 ## 🗂 Structure
 
 ```
-├── streamlit_app.py            # Application (scraping, caches, score, interface)
-├── requirements.txt            # Dépendances d'exécution
-├── requirements-dev.txt        # + pytest
-├── packages.txt                # Paquets système (Chromium) pour Streamlit Cloud
-├── tests/                      # Suite pytest
+├── streamlit_app.py     # Point d'entrée (met en page, charge le style, lance l'interface)
+├── cave/
+│   ├── config.py        # Constantes, tris, chemins (CAVE_CACHE_DIR pour changer .cache/)
+│   ├── storage.py       # Caches disque, Gist, checkpoint de reprise, rejets, prix
+│   ├── regions.py       # Régions, appellations, comparaison floue
+│   ├── vivino.py        # Requêtes, candidats, choix du meilleur, lecture des pages
+│   ├── browser.py       # Chromium headless (mode rapide pour Vivino)
+│   ├── leclerc.py       # Lecture du catalogue Leclerc
+│   ├── scoring.py       # Score qualité/prix, fusion Leclerc + Vivino
+│   ├── jobs.py          # Tâches de fond, mises à jour, reprise
+│   ├── render.py        # Cartes, tableaux, console
+│   ├── style.py         # Feuille de style
+│   └── screens.py       # Les 3 écrans
+├── tests/               # Suite pytest (sans réseau)
+├── requirements.txt · requirements-dev.txt · packages.txt
 ├── .streamlit/secrets.toml.example
-├── .github/workflows/tests.yml # CI
-├── leclerc_vins-rouges.json    # Export de départ (ancien format de cache)
-└── app.py, index.html          # Ancienne version Flask/Playwright (historique, non utilisée)
+└── app.py, index.html   # Ancienne version Flask/Playwright (historique, non utilisée)
 ```
 
 Le dossier `.cache/` (catalogues, notes Vivino, historique des prix, état du scraping) est généré
