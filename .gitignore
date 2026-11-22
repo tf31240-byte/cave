@@ -1,0 +1,16 @@
+# Caches générés par l'app (catalogue Leclerc, notes Vivino, historique des prix, job en cours)
+.cache/
+
+# Secrets Streamlit (token GitHub du Gist de sauvegarde) — ne jamais commiter
+.streamlit/secrets.toml
+
+# Python / tests
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Fichiers temporaires d'écriture atomique et sauvegardes locales
+*.tmp
+*.bak
