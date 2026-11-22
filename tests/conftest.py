@@ -1,4 +1,4 @@
-"""Fixtures partagées : app copiée dans un dossier temporaire + données synthétiques.
+"""Fixtures partagées : cache fictif dans un dossier temporaire (variable CAVE_CACHE_DIR).
 
 Aucun accès réseau, aucun navigateur : on teste les fonctions pures et le rendu de l'UI
 (streamlit.testing.v1.AppTest) sur un catalogue fictif. Le dossier .cache du dépôt n'est
@@ -8,13 +8,17 @@ import contextlib
 import io
 import json
 import logging
-import shutil
+import os
+import sys
+import tempfile
 import time
 from pathlib import Path
 
 import pytest
 
-APP_SRC = Path(__file__).resolve().parent.parent / "streamlit_app.py"
+ROOT = Path(__file__).resolve().parent.parent
+APP_SRC = ROOT / "streamlit_app.py"
+sys.path.insert(0, str(ROOT))
 
 
 def _synthetic_cache(cache_dir: Path) -> None:
@@ -44,38 +48,29 @@ def _synthetic_cache(cache_dir: Path) -> None:
     (cache_dir / "vivino_vins-rouges.json").write_text(json.dumps(vivino, ensure_ascii=False), "utf-8")
 
 
-@pytest.fixture(scope="session")
-def app_dir(tmp_path_factory) -> Path:
-    """Copie de l'app dans un dossier temporaire avec son .cache synthétique."""
-    d = tmp_path_factory.mktemp("cave_app")
-    shutil.copy(APP_SRC, d / "streamlit_app.py")
-    _synthetic_cache(d / ".cache")
-    return d
+# Le dossier de cache est fixé AVANT le premier import du paquet `cave`.
+_CACHE = Path(tempfile.mkdtemp(prefix="cave_cache_"))
+os.environ["CAVE_CACHE_DIR"] = str(_CACHE)
+_synthetic_cache(_CACHE)
 
 
 @pytest.fixture(scope="session")
-def ns(app_dir):
-    """Espace de noms de l'app après exécution « à nu » : donne accès aux fonctions pures.
-
-    Le script s'arrête de lui-même quand il n'a rien à afficher (st.stop) ; tout ce qui est
-    défini avant — c'est-à-dire toutes les fonctions testées ici — reste disponible.
-    """
+def ns():
+    """Espace de noms regroupant les fonctions de tous les modules de `cave` (lecture seule)."""
     logging.disable(logging.CRITICAL)
-    path = str(app_dir / "streamlit_app.py")
-    namespace = {"__name__": "streamlit_app", "__file__": path}
-    with contextlib.redirect_stderr(io.StringIO()):
-        try:
-            exec(compile(Path(path).read_text("utf-8"), path, "exec"), namespace)
-        except BaseException:
-            pass
-    assert "compute_score" in namespace, "l'app n'a pas pu être chargée"
-    return namespace
+    import importlib
+    merged = {}
+    for name in ("config", "regions", "storage", "vivino", "browser", "leclerc", "scoring",
+                 "jobs", "render"):
+        merged.update(vars(importlib.import_module(f"cave.{name}")))
+    assert "compute_score" in merged
+    return merged
 
 
 @pytest.fixture()
-def app_test(app_dir):
-    """AppTest Streamlit déjà exécuté une fois."""
+def app_test():
+    """AppTest Streamlit déjà exécuté une fois (écran Classement)."""
     from streamlit.testing.v1 import AppTest
-    at = AppTest.from_file(str(app_dir / "streamlit_app.py"), default_timeout=60)
+    at = AppTest.from_file(str(APP_SRC), default_timeout=60)
     at.run()
     return at
