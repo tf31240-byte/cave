@@ -173,17 +173,31 @@ def _assert_ok(at, ctx=""):
     assert not at.exception, (ctx, [e.value for e in at.exception])
 
 
+def _group(at, key):
+    return next(b for b in at.get("button_group") if b.key == key)
+
+
+def _go(at, screen):
+    _group(at, "screen").set_value(screen).run()
+
+
 def test_app_starts_without_secrets_on_ranking(app_test):
     _assert_ok(app_test)
-    assert app_test.sidebar.radio[0].options == SCREENS
-    assert app_test.sidebar.radio[0].value == SCREENS[0]
+    assert _group(app_test, "screen").value == SCREENS[0]
 
 
 def test_every_screen_renders(app_test):
     at = app_test
     for screen in SCREENS:
-        at.sidebar.radio[0].set_value(screen).run()
+        _go(at, screen)
         _assert_ok(at, screen)
+
+
+def test_every_wine_type_renders(app_test):
+    at = app_test
+    for label in list(_group(at, "wine_type").options):
+        _group(at, "wine_type").set_value(label).run()
+        _assert_ok(at, label)
 
 
 def test_ranking_sorts_views_and_filters(app_test):
@@ -193,25 +207,19 @@ def test_ranking_sorts_views_and_filters(app_test):
         sort_box.select(option).run()
         _assert_ok(at, option)
         sort_box = next(s for s in at.selectbox if s.key == "sort_key")
-    for view in ("Bonnes affaires", "Statistiques", "Tableau & export", "Liste"):
-        at.session_state["view"] = view
-        at.run()
+    for view in ("Affaires", "Stats", "Tableau", "Liste"):
+        _group(at, "view").set_value(view).run()
         _assert_ok(at, view)
     search = next(t for t in at.text_input if t.key and t.key.startswith("f_search_"))
     for value in ("bordeaux", "zzzzzz", ""):
         search.set_value(value).run()
         _assert_ok(at, value)
         search = next(t for t in at.text_input if t.key and t.key.startswith("f_search_"))
-    for box in list(at.sidebar.selectbox):
-        for option in box.options:
-            box.select(option).run()
-            _assert_ok(at, option)
-            box = at.sidebar.selectbox[0]
 
 
 def test_update_screen_shows_guided_steps_and_actions(app_test):
     at = app_test
-    at.sidebar.radio[0].set_value(SCREENS[1]).run()
+    _go(at, SCREENS[1])
     _assert_ok(at)
     labels = [b.label for b in at.button]
     assert any("Mettre à jour le catalogue" in l for l in labels)

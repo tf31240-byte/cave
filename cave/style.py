@@ -476,5 +476,96 @@ footer{display:none !important}
 [data-testid="stSidebar"] [data-testid="stSelectbox"] [role="group"] *{
   color:#1A0810 !important;-webkit-text-fill-color:#1A0810 !important}
 [data-testid="stSidebar"] [data-testid="stSelectbox"] svg{fill:#6B1A2A !important}
+
+/* ═══════════════ MOBILE-FIRST : tout dans la page, plus de menu latéral ═══════════════ */
+[data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"],[data-testid="stSidebarCollapseButton"]{display:none !important}
+[data-testid="stMainBlockContainer"]{
+  max-width:980px;margin:0 auto;padding:3.2rem 1rem 4rem !important}
+[data-testid="stHeader"]{background:transparent}
+.app-title{font-family:'Playfair Display',Georgia,serif;font-weight:700;font-size:1.55rem;
+  color:var(--ink,#1A0810);line-height:1.15;margin:0 0 .6rem}
+.app-title span{color:var(--gold,#C9A84C)}
+
+/* segmented controls = navigation, pleine largeur, grandes cibles tactiles */
+[data-testid="stButtonGroup"]{width:100%}
+[data-testid="stButtonGroup"] button{min-height:2.6rem;font-size:.85rem;flex:1 1 0;
+  white-space:nowrap;padding:0 .4rem}
+[data-testid="stButtonGroup"] button[kind="segmented_controlActive"],
+[data-testid="stButtonGroup"] button[aria-checked="true"]{
+  background:var(--wine,#6B1A2A) !important;color:#fff !important;font-weight:600}
+
+/* bandeau d'état */
+.status-strip{background:#fff;border:1px solid rgba(107,26,42,.12);border-radius:10px;
+  padding:.55rem .8rem;margin:.5rem 0 .9rem;box-shadow:0 1px 3px rgba(26,8,16,.05)}
+.status-line{display:flex;flex-wrap:wrap;gap:.3rem .9rem;justify-content:space-between;
+  font-size:.78rem;color:#5b4249}
+.status-strip .cov-bar{margin-top:.45rem}
+.chip{border-radius:999px;padding:.05rem .55rem;font-size:.7rem;font-weight:600}
+.chip-run{background:#fff3d6;color:#8a5a00}
+
+/* indicateurs compacts (3 colonnes même sur téléphone) */
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;margin:.3rem 0 .8rem}
+.kpi{background:#fff;border:1px solid rgba(107,26,42,.12);border-radius:10px;padding:.5rem .65rem;
+  box-shadow:0 1px 3px rgba(26,8,16,.05)}
+.kpi-label{font-size:.62rem;letter-spacing:.05em;text-transform:uppercase;color:#8B6B72}
+.kpi-value{font-size:1.05rem;font-weight:700;color:#1A0810;font-variant-numeric:tabular-nums}
+.kpi-sub{font-size:.62rem;color:#8B6B72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* boutons et champs : taille tactile */
+.stButton > button,.stDownloadButton > button{min-height:2.75rem;border-radius:10px}
+[data-testid="stPopover"] > div > button,[data-testid="stPopoverButton"]{min-height:2.4rem}
+input,textarea,[data-baseweb="select"] > div{font-size:16px !important}   /* évite le zoom iOS */
+
+@media (max-width:640px){
+  [data-testid="stMainBlockContainer"]{padding:2.8rem .65rem 4rem !important}
+  .app-title{font-size:1.3rem}
+  [data-testid="stButtonGroup"] button{font-size:.76rem;padding:0 .25rem}
+  [data-testid="stHorizontalBlock"]{gap:.5rem !important}
+  .kpi-value{font-size:.95rem}
+  .kpi-label{font-size:.56rem}
+  [data-testid="stMetric"]{padding:.55rem .65rem !important}
+  [data-testid="stMetricValue"]{font-size:1.15rem !important}
+  .tab-section{font-size:1.05rem}
+}
+
+/* compacité : barre Streamlit masquée, espacements réduits */
+[data-testid="stToolbar"],[data-testid="stDecoration"],[data-testid="stHeader"]{display:none !important}
+@media (max-width:640px){
+  [data-testid="stMainBlockContainer"]{padding-top:.8rem !important}
+  [data-testid="stVerticalBlock"]{gap:.55rem !important}
+  [data-testid="stButtonGroup"] button{min-height:2.3rem}
+  .app-title{margin-bottom:.15rem}
+  .status-strip{padding:.4rem .65rem;margin:.1rem 0 .3rem}
+  .kpis{margin:.1rem 0 .3rem}
+  .kpi{padding:.4rem .55rem}
+}
+
+/* carte vin compacte sur téléphone : nom + prix en haut, note + score en dessous */
+@media (max-width:640px){
+  .wine-card{display:grid;grid-template-columns:1.7rem 1fr auto;
+    grid-template-areas:"rank info price" ". rating score";
+    gap:.25rem .55rem;padding:.7rem .75rem .65rem .7rem;margin-bottom:.15rem}
+  .wine-card > .wine-rank{grid-area:rank;align-self:start;font-size:1rem;padding-top:.1rem}
+  .wine-card > .wine-info{grid-area:info}
+  .wine-card > div:nth-child(3){grid-area:rating;grid-column:auto}
+  .wine-card > div:nth-child(4){grid-area:price;text-align:right;align-self:start}
+  .wine-card > div:nth-child(5){grid-area:score}
+  .wine-card .wine-price{font-size:.98rem;grid-column:auto;text-align:right}
+  .wine-card .score-wrap{display:block;text-align:right}
+  .wine-card .score-bar{display:none}
+  .wine-card .score-num{font-size:.95rem}
+  .wine-card .wine-rating{grid-column:auto}
+  .wine-name{font-size:.88rem;-webkit-line-clamp:2}
+  .wine-links{margin-top:.2rem}
+  .app-title{margin-bottom:.5rem;padding-top:.3rem}
+}
+[data-testid="stPopover"]{margin:.1rem 0 .7rem}
+@media (max-width:640px){
+  .wine-card > div:nth-child(4) > div:nth-child(2){display:none}   /* libellé « prix » superflu */
+  .wine-card .r-cnt{white-space:nowrap;font-size:.62rem}
+  .wine-card .wine-rating{flex-wrap:nowrap;gap:.45rem}
+  .wine-card .score-lbl{display:none}
+}
 </style>
 '''
