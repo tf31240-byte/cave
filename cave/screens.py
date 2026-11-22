@@ -16,7 +16,7 @@ from .vivino import _PROGRESS_RE, build_query
 
 
 SCREENS = ["🏅 Classement", "🔄 Mise à jour", "⚙️ Réglages"]
-VIEWS = ["Liste", "Bonnes affaires", "Statistiques", "Tableau & export"]
+VIEWS = ["Liste", "Affaires", "Stats", "Tableau"]
 _ALL_SLUGS = list(WINE_TYPES.values())
 _JOB_ACTIVE = {"running", "queued"}
 
@@ -174,54 +174,43 @@ def coverage(slug: str, lc: dict | None, vc: dict) -> dict:
 # BARRE LATÉRALE
 # ═══════════════════════════════════════════════════════════════════════════
 
-def sidebar() -> str:
-    """Affiche la barre latérale. Retourne le slug du type de vin choisi."""
-    with st.sidebar:
+def topbar() -> str:
+    """En-tête de l'app : titre, écran, type de vin, état des données. Retourne le slug choisi.
+
+    Tout est dans la page (pas de barre latérale) : sur téléphone, le menu latéral est
+    masqué par défaut et gênant, alors que ces commandes doivent toujours être à portée de pouce.
+    """
+    st.markdown('<div class="app-title">🍷 Cave <span>Leclerc</span> × Vivino</div>', unsafe_allow_html=True)
+    st.segmented_control("Écran", SCREENS, default=SCREENS[0], key="screen",
+                         label_visibility="collapsed", width="stretch")
+    # un clic sur l'écran actif le désélectionne : on retombe sur le dernier écran valide
+    if st.session_state.get("screen") in SCREENS:
+        st.session_state["_last_screen"] = st.session_state["screen"]
+
+    types = list(WINE_TYPES)
+    st.segmented_control("Type de vin", types, default=types[0], key="wine_type",
+                         label_visibility="collapsed", width="stretch")
+    if st.session_state.get("wine_type") in WINE_TYPES:
+        st.session_state["_last_type"] = st.session_state["wine_type"]
+    slug = WINE_TYPES[st.session_state.get("_last_type", types[0])]
+
+    lc, vc = load_leclerc_cache(slug), load_vivino_cache(slug)
+    cov = coverage(slug, lc, vc)
+    job = load_job_state()
+    if lc:
+        cls = "cov-fill cov-full" if cov["pct"] == 100 else "cov-fill"
+        chip = ('<span class="chip chip-run">⏳ scraping en cours</span>'
+                if job.get("status") in _JOB_ACTIVE else "")
         st.markdown(
-            '<div class="sb-brand"><div class="sb-brand-title">🍷 Cave <span>Leclerc</span></div>'
-            '<div class="sb-brand-sub">Blagnac × Vivino</div></div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="sb-section">🍾 Type de vin</div>', unsafe_allow_html=True)
-        label = st.selectbox("Type de vin", list(WINE_TYPES), key="wine_type",
-                             label_visibility="collapsed")
-        slug = WINE_TYPES[label]
-
-        st.markdown('<div class="sb-section">📍 Aller à</div>', unsafe_allow_html=True)
-        st.radio("Écran", SCREENS, key="screen", label_visibility="collapsed")
-
-        lc, vc = load_leclerc_cache(slug), load_vivino_cache(slug)
-        cov = coverage(slug, lc, vc)
-        if lc:
-            cls = "cov-fill cov-full" if cov["pct"] == 100 else "cov-fill"
-            st.markdown(
-                f'<div class="cov-wrap">'
-                f'<div class="cov-label"><span>📦 Catalogue <strong>{fmt_age(lc["cached_at"])}</strong></span>'
-                f'<span>{cov["total"]} vins</span></div>'
-                f'<div class="cov-label" style="margin-top:.35rem"><span>🍷 Notes Vivino '
-                f'<strong>{cov["rated"]}/{cov["total"]}</strong></span>'
-                f'<span style="color:rgba(201,168,76,.8)">{cov["pct"]}%</span></div>'
-                f'<div class="cov-bar"><div class="{cls}" style="width:{cov["pct"]}%"></div></div>'
-                f'</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(
-                '<div class="cov-wrap"><div class="cov-label"><span>📦 Catalogue</span>'
-                '<span style="color:#dc6060">à charger</span></div></div>', unsafe_allow_html=True)
-
-        job = load_job_state()
-        if job.get("status") in _JOB_ACTIVE:
-            m = _PROGRESS_RE.search(job.get("message", ""))
-            pct = int(100 * int(m.group(1)) / max(int(m.group(2)), 1)) if m else 5
-            st.markdown(
-                f'<div class="job-card"><div class="job-title">⏳ Scraping en cours</div>'
-                f'<div class="job-bar"><div class="job-fill" style="width:{pct}%"></div></div>'
-                f'<div class="job-meta">{pct}% · détails dans « Mise à jour »</div></div>',
-                unsafe_allow_html=True)
-
-        st.checkbox("🟢 Suivi en temps réel", value=True, key="live",
-                    help="Rafraîchit l'écran toutes les 2 s pendant un scraping.")
-        st.markdown(
-            f'<div style="font-size:.6rem;color:rgba(200,168,176,.4);margin-top:.4rem">'
-            f'Leclerc Blagnac · magasin {STORE_CODE}</div>', unsafe_allow_html=True)
+            f'<div class="status-strip"><div class="status-line">'
+            f'<span>📦 <strong>{cov["total"]}</strong> vins · {fmt_age(lc["cached_at"])}</span>'
+            f'<span>🍷 <strong>{cov["rated"]}/{cov["total"]}</strong> notés</span>{chip}</div>'
+            f'<div class="cov-bar"><div class="{cls}" style="width:{cov["pct"]}%"></div></div></div>',
+            unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="status-strip"><div class="status-line">'
+                    '<span>📦 Catalogue <strong>à charger</strong> → onglet « Mise à jour »</span></div></div>',
+                    unsafe_allow_html=True)
     return slug
 
 
@@ -240,15 +229,14 @@ def _filter_keys(slug: str) -> list:
 def apply_filters(wines: list, slug: str) -> list:
     """Barre de recherche + tri + filtres avancés. Retourne les vins filtrés et triés."""
     k = lambda n: f"f_{n}_{slug}"   # noqa: E731
-    c1, c2, c3 = st.columns([3, 2, 2])
-    search = c1.text_input("Rechercher", key=k("search"),
-                           placeholder="Nom, domaine ou région : Bordeaux, Guigal, Pomerol…")
-    c2.selectbox("Trier par", list(SORTS), key="sort_key")
-    only_dispo = c3.toggle("🏪 Seulement les vins en rayon", value=True, key=k("avail"))
+    search = st.text_input("Rechercher", key=k("search"), label_visibility="collapsed",
+                           placeholder="🔍 Nom, domaine, région…")
 
     price_max = max((w.get("price") or 0 for w in wines), default=200)
     ceil = max(200, int(math.ceil(price_max / 10) * 10))
-    with st.expander("Plus de filtres : prix, note, région, cépage…"):
+    with st.expander("⚙️ Trier et filtrer"):
+        st.selectbox("Trier par", list(SORTS), key="sort_key")
+        only_dispo = st.toggle("🏪 Seulement les vins en rayon", value=True, key=k("avail"))
         a, b, c = st.columns(3)
         pmin = a.number_input("Prix min (€)", 0, ceil, 0, 1, key=k("pmin"))
         pmax = b.number_input("Prix max (€)", 0, ceil, ceil, 1, key=k("pmax"))
@@ -310,13 +298,21 @@ def view_list(filtered: list, slug: str, drops: list) -> None:
     prices = [w["price"] for w in filtered if w.get("price")]
     rated = [w["rating"] for w in filtered if w.get("rating")]
     best = max(filtered, key=lambda w: w.get("score") or 0, default=None)
-    m1, m2, m3 = st.columns(3)
-    m1.metric("🏆 Meilleur rapport qualité/prix",
-              f"{best['score']:.2f}" if best and best.get("score") else "—",
-              help=best["name"][:60] if best else None)
-    m2.metric("💶 Fourchette de prix",
-              f"{min(prices):.2f} – {max(prices):.2f} €".replace(".", ",") if prices else "—")
-    m3.metric("⭐ Meilleure note", f"★ {max(rated):.2f}" if rated else "—")
+    price_txt = f"{min(prices):.0f}–{max(prices):.0f} €" if prices else "—"
+    if best and best.get("score"):
+        best_html = (f'<div class="kpi-value">{best["score"]:.2f}</div>'
+                     f'<div class="kpi-sub">{_html.escape(best["name"][:26])}</div>')
+    else:
+        best_html = '<div class="kpi-value">—</div>'
+    note_txt = f"{max(rated):.2f}" if rated else "—"
+    st.markdown(
+        '<div class="kpis">'
+        f'<div class="kpi"><div class="kpi-label">🏆 Meilleur score</div>{best_html}</div>'
+        f'<div class="kpi"><div class="kpi-label">💶 Prix</div><div class="kpi-value">{price_txt}</div>'
+        f'<div class="kpi-sub">{len(filtered)} vins</div></div>'
+        f'<div class="kpi"><div class="kpi-label">⭐ Meilleure note</div>'
+        f'<div class="kpi-value">{note_txt}</div></div>'
+        '</div>', unsafe_allow_html=True)
 
     dropped = [d for d in drops if d["wine"] in filtered]
     if dropped:
@@ -326,7 +322,7 @@ def view_list(filtered: list, slug: str, drops: list) -> None:
                    + (" …" if len(dropped) > 4 else ""), icon=None)
     n_bad = sum(1 for w in filtered if w.get("vintage_match") is False)
     if n_bad:
-        st.warning(f"⚠️ {n_bad} vin(s) dont le millésime diffère entre Leclerc et Vivino (bordure orange).")
+        st.caption(f"⚠️ {n_bad} vin(s) : millésime Vivino différent de Leclerc (bordure orange).")
 
     if not filtered:
         st.info("Aucun vin ne correspond aux filtres actifs.")
@@ -346,7 +342,7 @@ def view_list(filtered: list, slug: str, drops: list) -> None:
         uid = f"{slug}_{w.get('ean') or i}_{page}"
         st.markdown(wine_card_html(w, start + i + 1, max_score), unsafe_allow_html=True)
         if w.get("vivino_url"):
-            with st.popover("🚫 Ce n'est pas le bon vin sur Vivino ?"):
+            with st.popover("🚫 Pas le bon vin sur Vivino ?"):
                 _reject_form(w, slug, uid)
 
     if n_pages > 1:
@@ -550,12 +546,13 @@ def screen_ranking(slug: str) -> None:
                      f"(-{top['pct']:.0f}%)", icon="📉")
 
     filtered = apply_filters(wines, slug)
-    view = st.segmented_control("Vue", VIEWS, default=VIEWS[0], key="view", label_visibility="collapsed") or VIEWS[0]
+    view = st.segmented_control("Vue", VIEWS, default=VIEWS[0], key="view", label_visibility="collapsed",
+                                width="stretch") or VIEWS[0]
     if view == "Liste":
         view_list(filtered, slug, drops)
-    elif view == "Bonnes affaires":
+    elif view == "Affaires":
         view_deals(filtered)
-    elif view == "Statistiques":
+    elif view == "Stats":
         view_stats(filtered)
     else:
         view_table(filtered, wines, slug)
@@ -618,13 +615,21 @@ def screen_update(slug: str) -> None:
     cov, job = coverage(slug, lc, vc), load_job_state()
     running = job.get("status") in _JOB_ACTIVE
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("📦 Catalogue Leclerc", f"{cov['total']} vins" if lc else "—",
-              help=f"Mis à jour {fmt_age(lc['cached_at'])}" if lc else "Pas encore chargé")
-    c2.metric("🍷 Notes Vivino", f"{cov['rated']}/{cov['total']}" if lc else "—",
-              delta=f"{cov['missing']} manquantes" if cov["missing"] else None, delta_color="off")
-    c3.metric("⏳ Notes obsolètes", cov["stale"], help=f"Plus de {VIVINO_CACHE_TTL_DAYS} jours")
+    st.markdown(
+        '<div class="kpis">'
+        f'<div class="kpi"><div class="kpi-label">📦 Catalogue</div>'
+        f'<div class="kpi-value">{cov["total"] if lc else "—"}</div>'
+        f'<div class="kpi-sub">{"vins · " + fmt_age(lc["cached_at"]) if lc else "à charger"}</div></div>'
+        f'<div class="kpi"><div class="kpi-label">🍷 Notés</div>'
+        f'<div class="kpi-value">{cov["rated"]}/{cov["total"]}</div>'
+        f'<div class="kpi-sub">{cov["missing"]} manquants</div></div>'
+        f'<div class="kpi"><div class="kpi-label">⏳ Obsolètes</div>'
+        f'<div class="kpi-value">{cov["stale"]}</div>'
+        f'<div class="kpi-sub">&gt; {VIVINO_CACHE_TTL_DAYS} jours</div></div>'
+        '</div>', unsafe_allow_html=True)
 
+    st.toggle("🟢 Suivi en temps réel", value=True, key="live",
+              help="Rafraîchit l'écran toutes les 2 s pendant un scraping.")
     if running:
         _job_card(job, slug)
         st.markdown("**Journal en direct**")
@@ -776,7 +781,7 @@ def _backup_section() -> None:
 def _rejections_section() -> None:
     rejs = load_vivino_rejections()
     if not rejs:
-        st.caption("Aucun rejet enregistré. Utilisez « 🚫 Ce n'est pas le bon vin sur Vivino ? » sous un vin du classement.")
+        st.caption("Aucun rejet enregistré. Utilisez « 🚫 Pas le bon vin sur Vivino ? » sous un vin du classement.")
         return
     total = sum(len(v.get("history", [])) for v in rejs.values())
     hard = sum(1 for v in rejs.values() if v.get("hard_to_match"))
@@ -879,15 +884,10 @@ def screen_settings(slug: str) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def run() -> None:
-    st.markdown(
-        '<div class="main-title">🍷 Cave <span>Leclerc Blagnac</span> × Vivino</div>'
-        '<div class="subtitle">Les vins du rayon, classés par rapport qualité / prix</div>'
-        '<hr class="title-rule">', unsafe_allow_html=True)
     _run_startup()
-    st.session_state.setdefault("screen", SCREENS[0])
-    slug = sidebar()
+    slug = topbar()
     _start_polling(load_job_state())
-    screen = st.session_state.get("screen", SCREENS[0])
+    screen = st.session_state.get("screen") or st.session_state.get("_last_screen") or SCREENS[0]
     if screen == SCREENS[1]:
         screen_update(slug)
     elif screen == SCREENS[2]:

@@ -8,7 +8,7 @@ import logging
 import streamlit as st
 
 st.set_page_config(page_title="Cave Leclerc Blagnac × Vivino", page_icon="🍷",
-                   layout="wide", initial_sidebar_state="expanded")
+                   layout="wide", initial_sidebar_state="collapsed")
 
 
 class _NoScriptRunContext(logging.Filter):
