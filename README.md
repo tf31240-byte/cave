@@ -122,3 +122,14 @@ Les données déjà acquises (`.cache/`) sont conservées et reprises telles que
 
 Le dossier `.cache/` (catalogues, notes Vivino, historique des prix, état du scraping) est généré
 à l'exécution et ignoré par git.
+
+## Savoir ce qui se passe
+
+L'écran **Mise à jour** montre tout ce que fait l'app :
+
+- **En direct** pendant un scraping Vivino : compteurs (notés / à vérifier / introuvables / erreurs), temps restant, et journal détaillé (un vin = une ligne : note, nombre d'avis, confiance, millésime, durée).
+- **Rapport du dernier catalogue** : vins ajoutés ➕, retirés ➖, revenus 🔄 et changements de prix 💶 (et un toast de bilan à la fin).
+- **Rapport du dernier scraping Vivino** : tableau filtrable (à vérifier, introuvables, erreurs) avec lien Vivino.
+- **Journal d'activité complet** : conservé entre les sessions (`.cache/activity.jsonl`), filtrable par type, niveau et texte, téléchargeable.
+- Les erreurs (navigateur qui ne démarre pas, page illisible…) sont désormais écrites dans le journal au lieu d'être silencieuses.
+- Les vins apparus depuis moins de 14 jours portent le badge « 🆕 Nouveau ».

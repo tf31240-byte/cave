@@ -61,7 +61,7 @@ def ns():
     import importlib
     merged = {}
     for name in ("config", "regions", "storage", "vivino", "browser", "leclerc", "scoring",
-                 "jobs", "render"):
+                 "activity", "jobs", "render"):
         merged.update(vars(importlib.import_module(f"cave.{name}")))
     assert "compute_score" in merged
     return merged

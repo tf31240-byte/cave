@@ -1,6 +1,6 @@
-"""Navigateur Chromium headless (Selenium)."""
 # AUTO-IMPORTS
 # END-AUTO
+"""Navigateur Chromium headless (Selenium)."""
 
 def make_driver(fast: bool = False):
     """

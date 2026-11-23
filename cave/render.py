@@ -1,11 +1,12 @@
 """Rendu : cartes de vins, tableaux, console de logs."""
+import time
 import streamlit as st
 import pandas as pd
 import html as _html
 # AUTO-IMPORTS
-from .config import VIVINO_LOW_CONFIDENCE
-from .scoring import fmt_count
 from .vivino import build_query
+from .scoring import fmt_count
+from .config import VIVINO_LOW_CONFIDENCE
 # END-AUTO
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -73,6 +74,9 @@ def wine_card_html(wine: dict, rank: int, max_score: float) -> str:
     rating = wine.get("rating")
     badges = ""
     if rating and rating >= 4.3:             badges += '<span class="badge b-top">★ Top noté</span>'
+    _fs = wine.get("first_seen")
+    if _fs and time.time() - _fs < 14 * 86400:
+        badges += '<span class="badge b-top">🆕 Nouveau</span>'
     _conf = wine.get("match_confidence")
     if wine.get("vivino_url") and _conf and _conf < VIVINO_LOW_CONFIDENCE and not wine.get("locked"):
         badges += '<span class="badge b-stale" title="Correspondance Vivino peu sûre">🔎 À vérifier</span>'

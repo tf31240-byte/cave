@@ -3,14 +3,19 @@ import json
 import time
 import threading
 # AUTO-IMPORTS
+from .activity import add_event, make_log, new_run, save_report
 from .storage import _JOB_FLUSH_INTERVAL, _invalidate_mem_cache, _job_lock, _read_json_cached, ckpt_create, ckpt_finish, ckpt_load, ckpt_tick, get_rejected_urls, is_hard_to_match, load_leclerc_cache, load_price_history, load_vivino_cache, load_vivino_rejections, save_leclerc_cache, save_vivino_cache, update_price_history
-from .vivino import _vivino_is_blocked, build_query, fetch_vivino, fetch_vivino_via_api
-from .config import JOB_LOG_PATH, JOB_STATE_PATH, VIVINO_CACHE_TTL_DAYS, _VIVINO_SEL_WORKERS
+from .config import JOB_LOG_PATH, JOB_STATE_PATH, VIVINO_CACHE_TTL_DAYS, VIVINO_LOW_CONFIDENCE, _VIVINO_SEL_WORKERS
 from .leclerc import _scrape_all_leclerc_pages, _set_store_cookie, check_availability, scrape_leclerc_full
-from .regions import extract_region
-from .browser import make_driver
+from .vivino import _vivino_is_blocked, build_query, fetch_vivino, fetch_vivino_via_api
 from .scoring import _merge_vivino, fmt_age, fmt_count
+from .browser import make_driver
+from .regions import extract_region
 # END-AUTO
+
+# Buffer du job state : n'écrit sur disque qu'1×/seconde max (état propre à ce module).
+_job_buf: dict = {}
+_job_buf_last_flush: float = 0.0
 
 def load_job_state() -> dict:
     data = _read_json_cached(JOB_STATE_PATH, ttl=0.5)  # TTL court : réactivité temps réel console
@@ -59,10 +64,16 @@ def _background_job(slug: str, mode: str) -> None:
         JOB_LOG_PATH.write_text("", "utf-8")
     except Exception:
         pass
-    _set_job_state(status="running", slug=slug, mode=mode, message="Démarrage…", error="")
+    _set_job_state(status="running", slug=slug, mode=mode, message="Démarrage…", error="", stats={})
+    _MODE_LABEL = {"refresh_all": "tout rafraîchir", "fill_missing": "compléter les manquants",
+                   "resume": "reprise du scraping", "refresh_stale": "rafraîchir les obsolètes"}
+    new_run("vivino", label=f"notes Vivino — {_MODE_LABEL.get(mode, mode)}", slug=slug, mode=mode)
 
-    def _log(msg: str):
-        _set_job_state(message=msg)
+    def _log(msg: str, **data):
+        _set_job_state(message=msg.splitlines()[0] if msg.strip() else msg)
+        for i, line in enumerate(msg.replace("**", "").splitlines()):
+            if line.strip():
+                add_event("vivino", line.strip(), **(data if i == 0 else {}))
         # Écrire chaque sous-ligne séparément → évite le \n littéral dans la console.
         # Certains messages contiennent des \n embarqués (ex. résumé multi-lignes).
         try:
@@ -86,8 +97,12 @@ def _background_job(slug: str, mode: str) -> None:
             raise ValueError(f"Mode inconnu: {mode}")
 
         n_rated = sum(1 for w in raw if w.get("rating"))
+        add_event("vivino", f"🏁 Passage terminé · {n_rated}/{len(raw)} vins notés", "ok")
         _set_job_state(status="done", message=f"✅ Terminé · {n_rated} vins notés", finished_at=time.time())
     except Exception as e:
+        import traceback
+        add_event("vivino", f"❌ Le scraping s'est arrêté sur une erreur : {type(e).__name__}: {e}", "error",
+                  trace=traceback.format_exc()[-1500:])
         _set_job_state(status="error", error=str(e), message=f"❌ {e}", finished_at=time.time())
 
 
@@ -123,18 +138,30 @@ def load_wines_from_cache(slug: str) -> list:
 
 
 def run_check_stock(slug: str, log=None) -> list:
+    """Met à jour le catalogue Leclerc. Les changements sont consignés dans le journal et le rapport."""
+    t0 = time.time()
+    new_run("catalogue", label=f"catalogue Leclerc ({slug})", slug=slug)
+    log = make_log("catalogue", mirror=log)
     lc = load_leclerc_cache(slug)
     vc = load_vivino_cache(slug)
+    report: dict = {"slug": slug}
     if lc:
-        if log: log(f"📦 Cache Leclerc ({fmt_age(lc['cached_at'])}) — vérif. stock…")
-        wines = check_availability(slug, lc["wines"], log=log)
+        log(f"📦 Catalogue en cache : {len(lc['wines'])} vins ({fmt_age(lc['cached_at'])})")
+        wines = check_availability(slug, lc["wines"], log=log, report=report)
         save_leclerc_cache(slug, wines)
     else:
-        if log: log("🚀 Pas de cache — scrape Leclerc complet…")
+        log("🚀 Pas de catalogue en cache : lecture complète du rayon…")
         wines = scrape_leclerc_full(slug, log=log)
-        for w in wines: w["available"] = True
+        for w in wines:
+            w["available"] = True
         save_leclerc_cache(slug, wines)
-        if log: log(f"💾 Cache Leclerc sauvegardé ({len(wines)} vins)")
+        log(f"💾 Catalogue sauvegardé : {len(wines)} vins")
+        report.update(ok=True, total=len(wines), available=len(wines), first_load=True,
+                      new=[{"name": w["name"], "price": w.get("price")} for w in wines],
+                      removed=[], back=[], price_changes=[], fetched=len(wines))
+    report["secs"] = round(time.time() - t0, 1)
+    save_report("catalogue", report)
+    log(f"⏱️ Terminé en {report['secs']:.0f} s")
     return _merge_vivino(wines, vc, load_price_history())
 
 
@@ -247,31 +274,50 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
         _seen_ids[id(w)] = k
         _ns_keyed.append((k, w, r))
 
-    def _worker_scrape(chunk: list[tuple[str,dict,str]], worker_id: int) -> None:
-        """Un worker scrape son chunk avec son propre driver Chrome."""
+    def _ev(msg: str, **data) -> None:
+        if not log:
+            return
+        try:
+            log(msg, **data)
+        except TypeError:       # logger sans données structurées (ex. affichage direct)
+            log(msg)
+
+    def _empty_vd() -> dict:
+        return {"rating": None, "ratings_count": 0, "vivino_url": "", "vivino_year": None,
+                "vintage_match": None, "match_confidence": 0.0}
+
+    def _worker_scrape(chunk: list[tuple[str, dict, str]], worker_id: int) -> None:
+        """Un worker scrape son lot avec son propre navigateur. Toute erreur est remontée au journal."""
         _drv = None
         try:
-            _drv = make_driver(fast=True)
+            try:
+                _drv = make_driver(fast=True)
+            except Exception as e:
+                _ev(f"❌ Navigateur n°{worker_id + 1} impossible à démarrer : {type(e).__name__}: {str(e)[:160]}"
+                    " — vérifiez que Chromium et chromedriver sont installés (packages.txt).")
+                raise
             for key, wine, region in chunk:
+                t_w = time.time()
+                err = ""
                 try:
                     _ku = vc.get(_key_of[id(wine)], {})
                     _ku = _ku.get("vivino_url", "") if not _ku.get("rating") else ""
                     vd = fetch_vivino(_drv, wine["name"], wine.get("vintage"),
                                       slug=slug, region=region, known_url=_ku)
-                except Exception:
-                    vd = {"rating": None, "ratings_count": 0, "vivino_url": "",
-                          "vivino_year": None, "vintage_match": None, "match_confidence": 0.0}
+                except Exception as e:
+                    vd, err = _empty_vd(), f"{type(e).__name__}: {str(e)[:140]}"
+                vd["_secs"] = round(time.time() - t_w, 1)
+                if err:
+                    vd["_error"] = err
                 with _results_lock:
                     _results[key] = vd
         except Exception as _we:
-            # Worker planté → marquer tous ses vins non traités comme vides
-            # pour ne pas bloquer la boucle de polling
+            # Worker planté : ses vins non traités sont marqués en erreur (pas de blocage silencieux)
             with _results_lock:
                 for _k, _w, _r in chunk:
                     if _k not in _results:
-                        _results[_k] = {"rating": None, "ratings_count": 0,
-                                        "vivino_url": "", "vivino_year": None,
-                                        "vintage_match": None, "match_confidence": 0.0}
+                        _results[_k] = {**_empty_vd(), "_error": f"navigateur {worker_id + 1} indisponible "
+                                                                 f"({type(_we).__name__})"}
         finally:
             if _drv:
                 try: _drv.quit()
@@ -286,86 +332,111 @@ def _scrape_vivino_list(slug, wines, todo, vc, log):
                for i, chunk in enumerate(chunks) if chunk]
     for t in threads: t.start()
 
-    # Polling : traiter les résultats au fur et à mesure
     _processed: set[str] = set()
     _total = len(_ns_keyed)
+    stats = {"found": 0, "uncertain": 0, "url_only": 0, "kept": 0, "not_found": 0, "errors": 0,
+             "locked": len(locked)}
+    rows: list[dict] = [{"name": w["name"], "outcome": "locked", "rating": (vc.get(_key_of[id(w)], {}) or {}).get("rating"),
+                         "count": (vc.get(_key_of[id(w)], {}) or {}).get("ratings_count"), "conf": None,
+                         "url": (vc.get(_key_of[id(w)], {}) or {}).get("vivino_url", ""), "secs": None, "error": ""}
+                        for w in locked]
+
+    def _handle(key: str, vd: dict) -> None:
+        """Enregistre le résultat d'un vin dans le cache et le journal."""
+        nonlocal done_count, found
+        wine, region = _pending[key]
+        ean = wine.get("ean") or key
+        orig_key = _key_of[id(wine)]
+        secs, err = vd.pop("_secs", None), vd.pop("_error", "")
+        _existing = vc.get(orig_key, {})
+        _new_has = bool(vd.get("rating") or vd.get("vivino_url"))
+        _had_data = bool(_existing.get("rating") or _existing.get("vivino_url"))
+        if _new_has:
+            vc[orig_key] = _make_vc_entry(vd)
+        elif _had_data:
+            vc[orig_key] = {**_existing, "cached_at": _existing.get("cached_at", time.time())}
+        else:
+            vc[orig_key] = _make_vc_entry(vd)
+        ckpt_tick(slug, ean)
+        done_count += 1
+        _processed.add(key)
+
+        name = wine["name"][:44]
+        head = f"[{done_count}/{len(wines)}] {name}"
+        tail = f" · {secs:.1f} s" if secs else ""
+        conf = vd.get("match_confidence") or 0.0
+        if err:
+            outcome = "error"; stats["errors"] += 1
+            _ev(f"  ❌ {head} — erreur : {err}", wine=wine["name"], outcome=outcome)
+        elif vd.get("rating"):
+            found += 1
+            vy = vd.get("vivino_year")
+            mil = ("" if not wine.get("vintage") else
+                   f" · millésime {'✓' if vd.get('vintage_match') else '≠'} (Vivino {vy or '?'}, Leclerc {wine['vintage']})")
+            base = f"★ {vd['rating']} · {fmt_count(vd.get('ratings_count'))} avis · confiance {conf:.0%}{mil}{tail}"
+            if conf and conf < VIVINO_LOW_CONFIDENCE:
+                outcome = "uncertain"; stats["uncertain"] += 1
+                _ev(f"  ⚠️ {head} — correspondance peu sûre, à vérifier : {base}", wine=wine["name"], outcome=outcome)
+            else:
+                outcome = "found"; stats["found"] += 1
+                _ev(f"  ✅ {head} — {base}", wine=wine["name"], outcome=outcome)
+            if found % 20 == 0:
+                save_vivino_cache(vc, slug)
+        elif _new_has:
+            outcome = "url_only"; stats["url_only"] += 1
+            _ev(f"  🔗 {head} — page Vivino trouvée mais note illisible{tail}", wine=wine["name"], outcome=outcome)
+        elif _had_data:
+            outcome = "kept"; stats["kept"] += 1
+            _ev(f"  ⚠️ {head} — non trouvé cette fois, ancienne note conservée{tail}", wine=wine["name"], outcome=outcome)
+        else:
+            outcome = "not_found"; stats["not_found"] += 1
+            _ev(f"  🔍 {head} — introuvable sur Vivino{tail}", wine=wine["name"], outcome=outcome)
+        rows.append({"name": wine["name"], "outcome": outcome, "rating": vd.get("rating"),
+                     "count": vd.get("ratings_count"), "conf": round(conf, 2) if conf else None,
+                     "vintage_match": vd.get("vintage_match"), "vivino_year": vd.get("vivino_year"),
+                     "url": vd.get("vivino_url", ""), "secs": secs, "error": err})
+        el = time.time() - _t0
+        eta = int(el / len(_processed) * (_total - len(_processed))) if _processed else None
+        _set_job_state(stats=dict(stats), eta_s=eta, per_wine_s=round(el / max(len(_processed), 1), 1))
+
     try:
         while len(_processed) < _total:
-            # Arrêt anticipé si tous les threads sont morts ET plus rien à venir
-            if all(not t.is_alive() for t in threads):
-                with _results_lock:
-                    _ready_now = {k: v for k, v in _results.items() if k not in _processed}
-                # Traiter ce qui reste puis sortir
-                for key, vd in _ready_now.items():
-                    if key not in _pending: continue
-                    wine, region = _pending[key]
-                    ean = wine.get("ean") or key
-                    _existing = vc.get(_key_of[id(wine)], {})
-                    _new_has  = bool(vd.get("rating") or vd.get("vivino_url"))
-                    _had_data = bool(_existing.get("rating") or _existing.get("vivino_url"))
-                    vc[_key_of[id(wine)]] = _make_vc_entry(vd) if _new_has else (
-                        {**_existing, "cached_at": _existing.get("cached_at", time.time())}
-                        if _had_data else _make_vc_entry(vd))
-                    ckpt_tick(slug, ean)
-                    done_count += 1; _processed.add(key)
-                    if vd.get("rating"): found += 1
-                # Marquer les non-traités comme interrompus
-                if len(_processed) < _total:
-                    interrupted = True
-                break
-
+            alive = any(t.is_alive() for t in threads)      # lu AVANT les résultats : rien n'échappe
             with _results_lock:
                 _ready = {k: v for k, v in _results.items() if k not in _processed}
             for key, vd in _ready.items():
-                if key not in _pending: continue
-                wine, region = _pending[key]
-                ean = wine.get("ean") or key
-                orig_key = _key_of[id(wine)]
-                _existing = vc.get(orig_key, {})
-                _new_has  = bool(vd.get("rating") or vd.get("vivino_url"))
-                _had_data = bool(_existing.get("rating") or _existing.get("vivino_url"))
-                if _new_has:
-                    vc[orig_key] = _make_vc_entry(vd)
-                elif _had_data:
-                    vc[orig_key] = {**_existing, "cached_at": _existing.get("cached_at", time.time())}
-                else:
-                    vc[orig_key] = _make_vc_entry(vd)
-                ckpt_tick(slug, ean)
-                done_count += 1
-                _processed.add(key)
-                if vd.get("rating"):
-                    found += 1
-                    if log: log(f"  ✅ [{done_count}/{len(wines)}] {wine['name'][:38]}\n"
-                                f"     ★ {vd['rating']} · {fmt_count(vd.get('ratings_count'))} avis")
-                    if found % 20 == 0:
-                        save_vivino_cache(vc, slug)
-                elif _new_has:
-                    if log: log(f"  🔗 [{done_count}/{len(wines)}] {wine['name'][:38]} — URL trouvée")
-                elif _had_data:
-                    if log: log(f"  ⚠️ [{done_count}/{len(wines)}] {wine['name'][:38]} — non trouvé, données conservées")
-                else:
-                    if log: log(f"  🔍 [{done_count}/{len(wines)}] {wine['name'][:45]} — aucune note")
+                if key in _pending:
+                    _handle(key, vd)
+            if not alive:
+                break
             if len(_processed) < _total:
                 time.sleep(0.5)
+        if len(_processed) < _total:
+            interrupted = True
+            _ev(f"⚠️ Tous les navigateurs se sont arrêtés avant la fin ({len(_processed)}/{_total} vins traités)")
         for t in threads: t.join(timeout=10)   # laisser le temps aux drivers de se fermer
     except Exception as e:
         interrupted = True
         for t in threads: t.join(timeout=3)
-        if log: log(f"⚠️ Interrompu à [{done_count}/{len(wines)}] : {e}")
+        _ev(f"⚠️ Interrompu à [{done_count}/{len(wines)}] : {e}")
     finally:
         save_vivino_cache(vc, slug, _force_gist=True)
         remaining = len(wines) - done_count
+        _el = time.time() - _t0
         if interrupted or remaining > 0:
-            if log: log(f"\n⚠️ {done_count}/{len(wines)} traités · {remaining} restants\n"
-                        f"💡 Cliquez **▶️ Reprendre** pour continuer")
+            _ev(f"⚠️ {done_count}/{len(wines)} traités · {remaining} restants — "
+                "utilisez « Reprendre » dans Mise à jour pour continuer")
         else:
             ckpt_finish(slug)
-            if log: log(f"✅ Terminé — {found} notes · {len(vc)} entrées cache")
-        if log and _processed:
-            _el = time.time() - _t0
-            log(f"⏱️ {_el:.0f} s pour {len(_processed)} vins · {_el/len(_processed):.1f} s/vin "
-                f"({n_w} navigateurs)")
-
+            _ev(f"✅ Terminé — {found} notes · {len(vc)} entrées cache")
+        if _processed:
+            _ev(f"⏱️ {_el:.0f} s pour {len(_processed)} vins · {_el / len(_processed):.1f} s/vin ({n_w} navigateurs)")
+        _ev(f"📊 Bilan : {stats['found']} notés · {stats['uncertain']} à vérifier · {stats['url_only']} URL seule · "
+            f"{stats['kept']} anciennes notes gardées · {stats['not_found']} introuvables · "
+            f"{stats['errors']} erreurs · {stats['locked']} verrouillés")
+        save_report("vivino", {"slug": slug, "total": len(wines), "processed": len(_processed),
+                               "stats": stats, "rows": rows, "secs": round(_el, 1), "workers": n_w,
+                               "interrupted": bool(interrupted or remaining > 0)})
 
 
 def repair_zero_prices(slug: str, log=None) -> int:

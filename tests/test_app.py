@@ -3,6 +3,8 @@
     pip install -r requirements-dev.txt
     pytest tests -q
 """
+import time
+
 import pytest
 
 
@@ -455,3 +457,161 @@ def test_existing_vivino_cache_format_still_loads_and_merges(ns):
     assert vc and all("rating" in e for e in vc.values())
     wines = ns["load_wines_from_cache"]("vins-rouges")
     assert wines and any(w.get("rating") for w in wines) and all("score" in w for w in wines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Journal d'activité et rapports
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_activity_journal_events_filters_and_reports(ns):
+    ns["new_run"]("vivino", label="test")
+    ns["add_event"]("vivino", "✅ bien", )
+    ns["add_event"]("vivino", "⚠️ douteux")
+    ns["add_event"]("catalogue", "❌ cassé")
+    assert ns["level_of"]("🔍 vin introuvable sur Vivino") == "warn"
+    run = ns["current_run"]()
+    evs = ns["read_events"](run=run)
+    assert [e["level"] for e in evs] == ["info", "ok", "warn", "error"]
+    assert [e["msg"] for e in ns["read_events"](kinds=["catalogue"], run=run)] == ["❌ cassé"]
+    assert len(ns["read_events"](levels=["warn"], run=run)) == 1
+    assert len(ns["read_events"](contains="DOUTEUX", run=run)) == 1
+    log = ns["make_log"]("vivino", mirror=lambda m: None)
+    log("ligne 1\nligne 2")
+    assert [e["msg"] for e in ns["read_events"](limit=2)] == ["ligne 1", "ligne 2"]
+    ns["save_report"]("t", {"a": 1})
+    assert ns["load_report"]("t")["a"] == 1 and ns["load_report"]("absent") == {}
+
+
+def test_activity_journal_rotates(ns, monkeypatch):
+    import cave.activity as act
+    monkeypatch.setattr(act, "_MAX_BYTES", 2000)
+    monkeypatch.setattr(act, "_KEEP_LINES", 5)
+    for i in range(60):
+        act.add_event("systeme", f"evt {i}")
+    assert len(act.ACTIVITY_PATH.read_text("utf-8").splitlines()) < 40
+    assert act.read_events(limit=1)[0]["msg"] == "evt 59"
+
+
+def _card(name, ean, price):
+    return {"name": name, "ean": ean, "price": price, "url": "u", "image": "", "vintage": None}
+
+
+def _fake_leclerc(monkeypatch, cards):
+    import cave.leclerc as lc
+
+    class _D:
+        def quit(self): pass
+    monkeypatch.setattr(lc, "make_driver", lambda *a, **k: _D())
+    monkeypatch.setattr(lc, "_set_store_cookie", lambda d: None)
+    monkeypatch.setattr(lc, "_scrape_all_leclerc_pages", lambda d, slug, log: cards)
+
+
+def test_check_availability_reports_new_removed_back_and_prices(ns, monkeypatch):
+    cached = [dict(_card("Vin A", "1", 10.0), available=True),
+              dict(_card("Vin B", "2", 8.0), available=True),
+              dict(_card("Vin C", "3", 5.0), available=False)]
+    _fake_leclerc(monkeypatch, [_card("Vin A", "1", 12.5), _card("Vin C", "3", 5.0), _card("Vin D", "4", 7.0)])
+    lines, rep = [], {}
+    out = ns["check_availability"]("vins-rouges", cached, log=lines.append, report=rep)
+    by = {w["name"]: w for w in out}
+    assert by["Vin B"]["available"] is False and by["Vin C"]["available"] is True
+    assert by["Vin A"]["price"] == 12.5
+    assert by["Vin D"]["available"] is True and by["Vin D"]["first_seen"] > 0
+    assert [n["name"] for n in rep["new"]] == ["Vin D"]
+    assert [n["name"] for n in rep["removed"]] == ["Vin B"]
+    assert [n["name"] for n in rep["back"]] == ["Vin C"]
+    assert rep["price_changes"][0]["old"] == 10.0 and rep["price_changes"][0]["new"] == 12.5
+    text = "\n".join(lines)
+    assert "➕ Nouveau" in text and "➖ Plus en rayon" in text and "🔄 De retour" in text and "Prix" in text
+
+
+def test_check_availability_leaves_catalogue_untouched_when_site_blocked(ns, monkeypatch):
+    cached = [dict(_card("Vin A", "1", 10.0), available=True)]
+    _fake_leclerc(monkeypatch, [])
+    lines, rep = [], {}
+    out = ns["check_availability"]("vins-rouges", cached, log=lines.append, report=rep)
+    assert out == cached and rep["ok"] is False
+    assert any("⚠️" in l for l in lines)
+
+
+def _scrape(ns, monkeypatch, fetch, driver_ok=True):
+    import cave.jobs as jobs
+    monkeypatch.setattr(jobs, "_VIVINO_SEL_WORKERS", 2)
+    if driver_ok:
+        class _D:
+            def quit(self): pass
+        monkeypatch.setattr(jobs, "make_driver", lambda *a, **k: _D())
+    else:
+        def _boom(*a, **k): raise RuntimeError("chromium introuvable")
+        monkeypatch.setattr(jobs, "make_driver", _boom)
+    monkeypatch.setattr(jobs, "fetch_vivino", fetch)
+    wines = [{"name": f"Test Vin {c} Bordeaux", "price": 9.0, "ean": f"99{i}", "vintage": None}
+             for i, c in enumerate("ABCD")]
+    todo = [(w, "Bordeaux") if False else w for w in wines]
+    lines = []
+    jobs._scrape_vivino_list("vins-test", wines, wines, {}, lambda m, **k: lines.append(m))
+    return lines, ns["load_report"]("vivino")
+
+
+def test_vivino_scrape_logs_each_wine_and_writes_report(ns, monkeypatch):
+    def fetch(drv, name, vintage, **k):
+        if "Vin A" in name:
+            return {"rating": 4.1, "ratings_count": 500, "vivino_url": "u", "vivino_year": 2019,
+                    "vintage_match": True, "match_confidence": 0.9}
+        if "Vin B" in name:
+            return {"rating": 3.9, "ratings_count": 20, "vivino_url": "u", "vivino_year": None,
+                    "vintage_match": None, "match_confidence": 0.4}
+        if "Vin C" in name:
+            raise ValueError("page cassée")
+        return {"rating": None, "ratings_count": 0, "vivino_url": "", "vivino_year": None,
+                "vintage_match": None, "match_confidence": 0.0}
+    lines, rep = _scrape(ns, monkeypatch, fetch)
+    text = "\n".join(lines)
+    assert "✅" in text and "confiance 90%" in text
+    assert "correspondance peu sûre" in text
+    assert "page cassée" in text and "❌" in text
+    assert "introuvable sur Vivino" in text and "📊 Bilan" in text
+    st_ = rep["stats"]
+    assert (st_["found"], st_["uncertain"], st_["errors"], st_["not_found"]) == (1, 1, 1, 1)
+    assert {r["outcome"] for r in rep["rows"]} == {"found", "uncertain", "error", "not_found"}
+
+
+def test_vivino_scrape_reports_browser_that_cannot_start(ns, monkeypatch):
+    lines, rep = _scrape(ns, monkeypatch, lambda *a, **k: {}, driver_ok=False)
+    text = "\n".join(lines)
+    assert "impossible à démarrer" in text and "chromium introuvable" in text
+    assert rep["stats"]["errors"] == 4          # rien n'est passé sous silence
+
+
+def test_new_wines_get_a_badge(ns):
+    w = {"name": "Vin Neuf", "price": 9.0, "rating": 4.0, "score": 5.0, "first_seen": time.time()}
+    assert "Nouveau" in ns["wine_card_html"](w, 1, 5.0)
+    assert "Nouveau" not in ns["wine_card_html"](dict(w, first_seen=time.time() - 40 * 86400), 1, 5.0)
+
+
+def test_update_screen_shows_reports_and_journal(app_test, ns):
+    ns["save_report"]("catalogue", {"ok": True, "total": 30, "available": 25, "secs": 4, "first_load": False,
+                                     "new": [{"name": "Vin Neuf", "price": 7.5}], "removed": [{"name": "Vin Parti"}],
+                                     "back": [], "price_changes": [{"name": "Vin X", "old": 5.0, "new": 6.0}]})
+    ns["save_report"]("vivino", {"total": 2, "processed": 2, "secs": 9, "stats": {"found": 1, "uncertain": 1},
+                                  "rows": [{"name": "Vin Douteux", "outcome": "uncertain", "rating": 3.9,
+                                            "count": 12, "conf": 0.4, "secs": 2.0, "error": "", "url": "u"}]})
+    ns["add_event"]("vivino", "✅ évènement visible")
+    at = app_test
+    _go(at, SCREENS[1])
+    _assert_ok(at)
+    html = " ".join(m.value for m in at.markdown)
+    assert "Rapport du dernier catalogue" in html and "Rapport du dernier scraping Vivino" in html
+    assert any("Vin Neuf" in m.value for m in at.markdown)
+    assert any("Journal d'activité" in e.label for e in at.expander)
+
+
+def test_background_job_runs_end_to_end_and_journals(ns, monkeypatch):
+    """Régression : _set_job_state référençait un tampon inexistant → le job plantait au démarrage."""
+    import cave.jobs as jobs
+    monkeypatch.setattr(jobs, "run_fill_missing_vivino", lambda slug, log=None: log("✅ simulé") or [])
+    jobs._background_job("vins-rouges", "fill_missing")
+    st_ = jobs.load_job_state()
+    assert st_["status"] == "done", st_
+    msgs = [e["msg"] for e in ns["read_events"](kinds=["vivino"], run=ns["current_run"]())]
+    assert any("Début" in m for m in msgs) and "✅ simulé" in msgs and any("Passage terminé" in m for m in msgs)
