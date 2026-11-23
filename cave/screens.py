@@ -6,11 +6,12 @@ import pandas as pd
 import streamlit as st
 # AUTO-IMPORTS
 from .storage import REJECTION_REASONS, _gist_can_restore, _gist_is_configured, _invalidate_mem_cache, _lec_path, _price_hist_path, _viv_path, ckpt_finish, ckpt_load, gist_push, load_leclerc_cache, load_price_history, load_vivino_cache, load_vivino_rejections, restore_from_gist, save_vivino_cache, save_vivino_rejection
-from .render import _DF_COL_CONFIG, _fmt_log_line, _make_logger, _make_wines_df, wine_card_html
+from .config import CACHE_DIR, CARDS_PER_PAGE, REJECTION_LOG_PATH, SORTS, VIVINO_CACHE_TTL_DAYS, WINE_TYPES
 from .jobs import get_price_drops, load_job_state, load_wines_from_cache, repair_zero_prices, run_check_stock, save_job_state, start_background_job
-from .config import CACHE_DIR, CARDS_PER_PAGE, JOB_LOG_PATH, REJECTION_LOG_PATH, SORTS, STORE_CODE, VIVINO_CACHE_TTL_DAYS, WINE_TYPES
-from .scoring import fmt_age, fmt_count, vivino_cache_type
 from .regions import _fuzzy_match, extract_region
+from .activity import KINDS, LEVELS, format_event, load_report, read_events
+from .scoring import fmt_age, fmt_count, vivino_cache_type
+from .render import _DF_COL_CONFIG, _make_logger, _make_wines_df, wine_card_html
 from .vivino import _PROGRESS_RE, build_query
 # END-AUTO
 
@@ -562,18 +563,126 @@ def screen_ranking(slug: str) -> None:
 # ÉCRAN 2 — MISE À JOUR
 # ═══════════════════════════════════════════════════════════════════════════
 
+_LVL_COLOR = {"ok": "#3fb950", "error": "#f85149", "warn": "#d29922", "info": "#c9d1d9"}
+
+
+def _journal_html(events: list, height: int = 300) -> str:
+    """Console HTML : événements du plus récent au plus ancien, colorés par niveau."""
+    import html as _h
+    if not events:
+        body = '<span style="color:#8b949e">(aucun événement pour le moment)</span>'
+    else:
+        body = "".join(
+            f'<div style="color:{_LVL_COLOR.get(e.get("level"), "#c9d1d9")}">'
+            f'<span style="color:#6e7681">{time.strftime("%d/%m %H:%M:%S", time.localtime(e.get("t", 0)))}</span> '
+            f'{_h.escape(e.get("msg", ""))}</div>' for e in reversed(events))
+    return (f'<div style="background:#0d1117;font-family:Consolas,Monaco,monospace;font-size:.72rem;'
+            f'line-height:1.5;padding:.75rem 1rem;border-radius:6px;border:1px solid #30363d;'
+            f'height:{height}px;overflow-y:auto;word-break:break-word">{body}</div>')
+
+
 def _console(job: dict, height: int = 300, lines: int = 400) -> None:
-    has_log = JOB_LOG_PATH.exists() and JOB_LOG_PATH.stat().st_size > 0
-    try:
-        text = JOB_LOG_PATH.read_text("utf-8") if has_log else ""
-    except Exception:
-        text = ""
-    rows = text.strip().splitlines()[-lines:] or ["(aucun journal)"]
+    """Journal du passage Vivino en cours (ou du dernier)."""
+    evs = read_events(limit=lines, kinds=["vivino"], run=_last_run("vivino"))
+    st.markdown(_journal_html(evs, height), unsafe_allow_html=True)
+
+
+def _last_run(kind: str) -> str | None:
+    evs = read_events(limit=1, kinds=[kind])
+    return evs[-1].get("run") if evs else None
+
+
+def _live_stats(job: dict) -> None:
+    s_ = job.get("stats") or {}
+    if not s_:
+        return
+    eta = job.get("eta_s")
+    eta_txt = (f"{eta // 60} min {eta % 60:02d} s" if eta and eta >= 60 else f"{eta} s") if eta is not None else "…"
     st.markdown(
-        f'<div style="background:#0d1117;color:#c9d1d9;font-family:Consolas,Monaco,monospace;'
-        f'font-size:.72rem;line-height:1.5;padding:.75rem 1rem;border-radius:6px;border:1px solid #30363d;'
-        f'height:{height}px;overflow-y:auto;white-space:pre-wrap;word-break:break-all">'
-        + "".join(_fmt_log_line(r) for r in rows) + "</div>", unsafe_allow_html=True)
+        '<div class="kpis">'
+        f'<div class="kpi"><div class="kpi-label">✅ Notés</div><div class="kpi-value">{s_.get("found", 0)}</div>'
+        f'<div class="kpi-sub">{s_.get("uncertain", 0)} à vérifier</div></div>'
+        f'<div class="kpi"><div class="kpi-label">🔍 Introuvables</div><div class="kpi-value">{s_.get("not_found", 0)}</div>'
+        f'<div class="kpi-sub">{s_.get("errors", 0)} erreur(s)</div></div>'
+        f'<div class="kpi"><div class="kpi-label">⏱️ Reste</div><div class="kpi-value">{eta_txt}</div>'
+        f'<div class="kpi-sub">{job.get("per_wine_s", "…")} s/vin</div></div>'
+        '</div>', unsafe_allow_html=True)
+
+
+_OUTCOME_LABEL = {"found": "✅ Noté", "uncertain": "🔎 À vérifier", "not_found": "🔍 Introuvable",
+                  "error": "❌ Erreur", "url_only": "🔗 URL seule", "kept": "♻️ Ancienne note", "locked": "🔒 Verrouillé"}
+
+
+def _vivino_report() -> None:
+    rep_ = load_report("vivino")
+    if not rep_:
+        return
+    s_, rows = rep_.get("stats", {}), rep_.get("rows", [])
+    st.markdown(f"**Rapport du dernier scraping Vivino** · {fmt_age(rep_.get('saved_at', 0))}"
+                + (" · ⚠️ interrompu" if rep_.get("interrupted") else ""))
+    st.caption(f"{rep_.get('processed', 0)}/{rep_.get('total', 0)} vins traités en {rep_.get('secs', 0):.0f} s · "
+               f"{s_.get('found', 0)} notés · {s_.get('uncertain', 0)} à vérifier · "
+               f"{s_.get('not_found', 0)} introuvables · {s_.get('errors', 0)} erreurs")
+    choice = st.segmented_control("Afficher", ["Tous", "À vérifier", "Introuvables", "Erreurs"],
+                                  default="À vérifier", key="rep_filter", label_visibility="collapsed")
+    want = {"Tous": None, "À vérifier": {"uncertain"}, "Introuvables": {"not_found", "url_only"},
+            "Erreurs": {"error"}}.get(choice)
+    shown = [r for r in rows if want is None or r.get("outcome") in want]
+    if not shown:
+        st.caption("Rien à afficher pour ce filtre. 👍")
+        return
+    import pandas as pd
+    df = pd.DataFrame([{
+        "Vin": r["name"], "Résultat": _OUTCOME_LABEL.get(r.get("outcome"), r.get("outcome")),
+        "Note": r.get("rating"), "Avis": r.get("count"),
+        "Confiance": r.get("conf"), "Durée (s)": r.get("secs"), "Détail": r.get("error") or "",
+        "Vivino": r.get("url") or None} for r in shown])
+    st.dataframe(df, hide_index=True, width="stretch", height=min(420, 40 + 35 * len(df)),
+                 column_config={"Vivino": st.column_config.LinkColumn("Vivino", display_text="ouvrir"),
+                                "Confiance": st.column_config.ProgressColumn(min_value=0, max_value=1, format="%.0f%%")
+                                if False else st.column_config.NumberColumn(format="%.2f")})
+
+
+def _catalogue_report() -> None:
+    r = load_report("catalogue")
+    if not r or not r.get("ok", True):
+        return
+    new, rem, back, pc = r.get("new", []), r.get("removed", []), r.get("back", []), r.get("price_changes", [])
+    st.markdown(f"**Rapport du dernier catalogue** · {fmt_age(r.get('saved_at', 0))}")
+    st.caption(f"{r.get('available', 0)} en rayon sur {r.get('total', 0)} · ➕ {len(new)} nouveaux · "
+               f"➖ {len(rem)} retirés · 🔄 {len(back)} revenus · 💶 {len(pc)} prix modifiés · "
+               f"{r.get('secs', 0):.0f} s")
+    if not (new or rem or back or pc):
+        st.caption("Aucun changement depuis la dernière lecture.")
+        return
+    def _fmt(x):
+        return f"{x:.2f} €" if isinstance(x, (int, float)) else "—"
+    if new:
+        with st.expander(f"➕ {len(new)} nouveau(x) vin(s)", expanded=len(new) <= 15):
+            st.markdown("\n".join(f"- {n['name']} — {_fmt(n.get('price'))}" for n in new[:200]))
+    if pc:
+        with st.expander(f"💶 {len(pc)} changement(s) de prix", expanded=len(pc) <= 15):
+            st.markdown("\n".join(f"- {n['name']} : {_fmt(n.get('old'))} → {_fmt(n.get('new'))}" for n in pc[:200]))
+    if rem:
+        with st.expander(f"➖ {len(rem)} vin(s) plus en rayon"):
+            st.markdown("\n".join(f"- {n['name']}" for n in rem[:200]))
+    if back:
+        with st.expander(f"🔄 {len(back)} vin(s) de retour en rayon"):
+            st.markdown("\n".join(f"- {n['name']}" for n in back[:200]))
+
+
+def _activity_journal() -> None:
+    c1, c2 = st.columns(2)
+    kinds = c1.multiselect("Type", list(KINDS), default=list(KINDS), format_func=KINDS.get, key="j_kinds")
+    levels = c2.multiselect("Niveau", list(LEVELS), default=[], format_func=LEVELS.get, key="j_levels",
+                            placeholder="Tous les niveaux")
+    q = st.text_input("Rechercher", key="j_q", placeholder="nom de vin, « introuvable », « prix »…")
+    evs = read_events(limit=600, kinds=kinds or None, levels=levels or None, contains=q)
+    st.caption(f"{len(evs)} événement(s) affiché(s) — le plus récent en haut. Le journal est conservé entre les sessions.")
+    st.markdown(_journal_html(evs, 340), unsafe_allow_html=True)
+    if evs:
+        st.download_button("⬇️ Télécharger (.txt)", "\n".join(format_event(e) for e in evs),
+                           file_name="journal-cave.txt", mime="text/plain")
 
 
 def _job_card(job: dict, slug: str) -> None:
@@ -632,7 +741,8 @@ def screen_update(slug: str) -> None:
               help="Rafraîchit l'écran toutes les 2 s pendant un scraping.")
     if running:
         _job_card(job, slug)
-        st.markdown("**Journal en direct**")
+        _live_stats(job)
+        st.markdown("**Journal en direct** (le plus récent en haut)")
         _console(job)
         return
 
@@ -674,7 +784,7 @@ def screen_update(slug: str) -> None:
     b1, b2 = st.columns([2, 1])
     if b1.button("🔄 Mettre à jour le catalogue", type="primary" if not lc else "secondary", width="stretch"):
         with st.status("Lecture du catalogue Leclerc…", expanded=True) as status:
-            log, _ = _make_logger(10)
+            log, _ = _make_logger(25)
             try:
                 raw = run_check_stock(slug, log=log)
             except Exception as e:
@@ -685,7 +795,9 @@ def screen_update(slug: str) -> None:
             n_dispo = sum(1 for w in raw if w.get("available", True))
             status.update(label=f"✅ {n_dispo} vins en rayon sur {len(raw)}", state="complete")
         _force_reload()
-        st.toast(f"✅ Catalogue à jour : {n_dispo} vins en rayon sur {len(raw)}", icon="🔄")
+        _r = load_report("catalogue")
+        st.toast(f"✅ {n_dispo} vins en rayon sur {len(raw)} · ➕ {len(_r.get('new', []))} nouveaux · "
+                 f"➖ {len(_r.get('removed', []))} retirés · 💶 {len(_r.get('price_changes', []))} prix", icon="🔄")
         st.rerun()
     if cov["zero_price"] and b2.button(f"🔧 Réparer {cov['zero_price']} prix à 0 €", width="stretch"):
         with st.status("Réparation des prix…", expanded=True) as status:
@@ -726,8 +838,11 @@ def screen_update(slug: str) -> None:
                 _launch(slug, "refresh_all", "Scraping Vivino complet lancé.")
 
     st.divider()
-    with st.expander("🖥️ Journal du dernier scraping"):
-        _console(job, height=260)
+    st.markdown('<div class="tab-section">Ce qui s\'est passé</div>', unsafe_allow_html=True)
+    _catalogue_report()
+    _vivino_report()
+    with st.expander("🖥️ Journal d'activité complet"):
+        _activity_journal()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
