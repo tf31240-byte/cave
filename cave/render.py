@@ -5,8 +5,8 @@ import pandas as pd
 import html as _html
 # AUTO-IMPORTS
 from .scoring import fmt_count
-from .vivino import build_query
 from .config import VIVINO_LOW_CONFIDENCE
+from .vivino import build_query
 # END-AUTO
 
 # ═══════════════════════════════════════════════════════════════════════════

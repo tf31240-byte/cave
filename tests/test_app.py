@@ -662,3 +662,26 @@ def test_diagnostic_ignores_captcha_words_inside_scripts(ns):
     class _D: title, current_url = "Vins Rouges | E.leclerc", "https://www.e.leclerc/cat/vins-rouges"
     html = "<html><script>var recaptcha='robot captcha'</script><body>" + "Bienvenue " * 50 + "</body></html>"
     assert "blocage probable" not in ns["_diagnose_page"](_D(), html)
+
+
+def test_leclerc_without_store_tries_selection_and_never_crashes(ns, monkeypatch):
+    import cave.leclerc as lc
+    import selenium.webdriver.support.ui as ui
+    monkeypatch.setattr(lc.time, "sleep", lambda *_: None)
+
+    class _W:
+        def __init__(self, *a, **k): pass
+        def until(self, *a, **k): raise TimeoutError("absent")
+    monkeypatch.setattr(ui, "WebDriverWait", _W)
+
+    class _D:
+        title, current_url = "Vins Rouges | E.leclerc", "https://www.e.leclerc/cat/vins-rouges"
+        page_source = "<html><body>Choisir mon magasin<p>Aucun résultat</p></body></html>"
+        def get(self, u): pass
+        def execute_script(self, *a): return []
+        def get_cookies(self): return [{"name": "abc"}]
+    lines = []
+    assert lc._scrape_all_leclerc_pages(_D(), "vins-rouges", lines.append) == []
+    text = "\n".join(lines)
+    assert "Aucun magasin sélectionné" in text and "Sélection du magasin impossible" in text
+    assert "État du navigateur" in text and "abc" in text
