@@ -5,8 +5,8 @@ from bs4 import BeautifulSoup
 # AUTO-IMPORTS
 from .vivino import _CARD_VINTAGE_RE, _EAN_OFFER_RE, _EAN_URL_RE, _PAGE_NUM_RE, _PRICE_CSS1_RE, _PRICE_CSS2_RE, _PRICE_FALLBACK_RE, extract_grapes_from_name, extract_volume_cl
 from .config import CACHE_DIR, LECLERC_PAGE_SIZE, MAX_PAGES, STORE_CODE
-from .browser import make_driver
 from .storage import update_price_history
+from .browser import make_driver
 # END-AUTO
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -247,10 +247,31 @@ def _browser_state(driver) -> str:
     try:
         out["reseau"] = driver.execute_script(
             "return performance.getEntriesByType('resource').map(e=>e.name)"
-            ".filter(n=>/api|rest|search|product|store|magasin/i.test(n)).slice(-25)")
+            ".filter(n=>/e\\.leclerc\\/(api|cat|search|recherche)|live-api|offer|product-?search|signCode|store/i.test(n)"
+            "&&!/_assets|media\\.e\\.leclerc/i.test(n)).slice(-30)")
     except Exception: pass
     import json as _json
     return _json.dumps(out, ensure_ascii=False)
+
+
+def _panel_summary(driver) -> str:
+    """Champs, boutons et cadres visibles après ouverture du sélecteur : sert à ajuster les sélecteurs CSS."""
+    try:
+        info = driver.execute_script("""
+          const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+          const d = (e) => (e.tagName + (e.id ? '#' + e.id : '') + (e.getAttribute('type') ? '[' + e.getAttribute('type') + ']' : '')
+                            + (e.getAttribute('placeholder') ? ' ph=' + e.getAttribute('placeholder') : '')
+                            + (e.getAttribute('aria-label') ? ' al=' + e.getAttribute('aria-label') : '')
+                            + (e.innerText ? ' « ' + e.innerText.trim().slice(0, 30) + ' »' : ''));
+          const sr = [...document.querySelectorAll('*')].filter(e => e.shadowRoot).length;
+          return {iframes: document.querySelectorAll('iframe').length, shadow: sr,
+                  dialogs: [...document.querySelectorAll('dialog, [role=dialog]')].filter(vis).map(d).slice(0, 4),
+                  inputs: [...document.querySelectorAll('input')].filter(vis).map(d).slice(0, 8),
+                  buttons: [...document.querySelectorAll('[id*=store] button, [role=dialog] button')].filter(vis).map(d).slice(0, 8)};""")
+        import json as _json
+        return _json.dumps(info, ensure_ascii=False)[:1200]
+    except Exception as e:
+        return f"illisible ({type(e).__name__})"
 
 
 def _select_store(driver, log=None) -> bool:
@@ -268,6 +289,8 @@ def _select_store(driver, log=None) -> bool:
         btn = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "header-store-locator-btn")))
         driver.execute_script("arguments[0].click()", btn)
         say("Sélecteur de magasin ouvert")
+        time.sleep(2)
+        say("Éléments du panneau : " + _panel_summary(driver))
         field = WebDriverWait(driver, 12).until(lambda d: next(
             (e for e in d.find_elements(By.CSS_SELECTOR,
                 "#header-store-locator input, [id*='store-locator'] input, [role=dialog] input")
