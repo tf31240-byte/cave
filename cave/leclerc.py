@@ -2,10 +2,10 @@
 import time
 from bs4 import BeautifulSoup
 # AUTO-IMPORTS
-from .vivino import _CARD_VINTAGE_RE, _EAN_OFFER_RE, _EAN_URL_RE, _PAGE_NUM_RE, _PRICE_CSS1_RE, _PRICE_CSS2_RE, _PRICE_FALLBACK_RE, extract_grapes_from_name, extract_volume_cl
-from .browser import make_driver
-from .config import LECLERC_PAGE_SIZE, MAX_PAGES, STORE_CODE
 from .storage import update_price_history
+from .vivino import _CARD_VINTAGE_RE, _EAN_OFFER_RE, _EAN_URL_RE, _PAGE_NUM_RE, _PRICE_CSS1_RE, _PRICE_CSS2_RE, _PRICE_FALLBACK_RE, extract_grapes_from_name, extract_volume_cl
+from .config import CACHE_DIR, LECLERC_PAGE_SIZE, MAX_PAGES, STORE_CODE
+from .browser import make_driver
 # END-AUTO
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -140,6 +140,37 @@ def _set_store_cookie(driver) -> None:
 
 
 
+_BLOCK_MARKERS = {
+    "captcha": "captcha", "datadome": "DataDome", "access denied": "Access Denied",
+    "robot": "détection de robot", "are you a human": "vérification humaine",
+    "cloudflare": "Cloudflare", "just a moment": "Cloudflare", "forbidden": "403 Forbidden",
+    "unusual traffic": "trafic inhabituel", "pardon our interruption": "blocage anti-bot",
+}
+
+
+def _diagnose_page(driver, html: str) -> str:
+    """Résumé lisible de ce que Leclerc a renvoyé + enregistrement de la page pour inspection."""
+    low = (html or "").lower()
+    try: title = (driver.title or "").strip()[:80]
+    except Exception: title = "?"
+    try: url = driver.current_url[:110]
+    except Exception: url = "?"
+    hints = sorted({v for k, v in _BLOCK_MARKERS.items() if k in low})
+    n_cards = low.count("<app-product-card")
+    parts = [f"titre « {title} »", f"URL {url}", f"{len(html or '')//1000} ko", f"{n_cards} <app-product-card>"]
+    if hints:
+        parts.append("🚫 blocage probable : " + ", ".join(hints))
+    elif n_cards:
+        parts.append("cartes présentes mais illisibles : le format de la page a peut-être changé")
+    else:
+        parts.append("aucune carte : page vide ou chargement trop lent")
+    try:
+        (CACHE_DIR / "debug_leclerc.html").write_text(html or "", "utf-8")
+    except Exception:
+        pass
+    return " · ".join(parts)
+
+
 def _scrape_all_leclerc_pages(driver, slug: str, log=None) -> list:
     """
     Itère toutes les pages Leclerc et retourne la liste brute de toutes les cartes.
@@ -157,21 +188,35 @@ def _scrape_all_leclerc_pages(driver, slug: str, log=None) -> list:
     nb_pages = 1
     for p in range(1, MAX_PAGES + 1):
         if log: log(f"  📄 Page {p}/{nb_pages}…")
-        driver.get(leclerc_url(slug, p))
-        waited = False
-        try:
-            WebDriverWait(driver, 18).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, _CARD_CSS)))
-            waited = True
-        except Exception:
-            pass
-        time.sleep(0.8 if waited else 2.5)   # court si déjà chargé, long sinon
-        html = driver.page_source
+        cards, nb = [], nb_pages
+        for attempt in range(1, 4 if p == 1 else 2):
+            driver.get(leclerc_url(slug, p))
+            waited = False
+            try:
+                WebDriverWait(driver, 18 if attempt == 1 else 30).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, _CARD_CSS)))
+                waited = True
+            except Exception:
+                pass
+            time.sleep(0.8 if waited else 2.5)   # court si déjà chargé, long sinon
+            try:   # défilement : certains blocs ne se chargent qu'au scroll
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2)")
+                time.sleep(0.5)
+            except Exception:
+                pass
+            html = driver.page_source
+            if p == 1:
+                cards, nb = parse_page(html)
+            else:
+                cards = parse_cards(html)
+            if cards:
+                break
+            if log:
+                log(f"  ⚠️ Page {p} : aucune carte lue (essai {attempt}). {_diagnose_page(driver, html)}")
+            if attempt < (3 if p == 1 else 1):
+                time.sleep(4 * attempt)
         if p == 1:
-            cards, nb_pages = parse_page(html)
-            nb_pages = min(nb_pages, MAX_PAGES)
-        else:
-            cards = parse_cards(html)
+            nb_pages = min(nb, MAX_PAGES)
         if not cards:
             if log: log(f"  ⚠️ Page {p} vide — arrêt")
             break
