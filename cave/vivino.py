@@ -9,9 +9,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 # AUTO-IMPORTS
-from .regions import _norm_ascii, extract_region
 from .config import VIVINO_API_HEADERS, VIVINO_API_TIMEOUT, VIVINO_CANDIDATES_MAX, VIVINO_GOOD_ENOUGH, VIVINO_MAX_SEARCHES, VIVINO_SIMILARITY_MIN, VIVINO_TYPE_IDS
 from .storage import load_vivino_rejections
+from .regions import _norm_ascii, extract_region
 # END-AUTO
 
 def _make_session() -> requests.Session:

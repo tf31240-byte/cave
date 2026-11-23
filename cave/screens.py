@@ -5,13 +5,13 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 # AUTO-IMPORTS
-from .vivino import _PROGRESS_RE, build_query
-from .regions import _fuzzy_match, extract_region
-from .storage import REJECTION_REASONS, _gist_can_restore, _gist_is_configured, _invalidate_mem_cache, _lec_path, _price_hist_path, _viv_path, ckpt_finish, ckpt_load, gist_push, load_leclerc_cache, load_price_history, load_vivino_cache, load_vivino_rejections, restore_from_gist, save_vivino_cache, save_vivino_rejection
-from .config import CACHE_DIR, CARDS_PER_PAGE, REJECTION_LOG_PATH, SORTS, VIVINO_CACHE_TTL_DAYS, WINE_TYPES
 from .jobs import get_price_drops, load_job_state, load_wines_from_cache, repair_zero_prices, run_check_stock, save_job_state, start_background_job
 from .activity import KINDS, LEVELS, format_event, load_report, read_events
+from .vivino import _PROGRESS_RE, build_query
+from .storage import REJECTION_REASONS, _gist_can_restore, _gist_is_configured, _invalidate_mem_cache, _lec_path, _price_hist_path, _viv_path, ckpt_finish, ckpt_load, gist_push, load_leclerc_cache, load_price_history, load_vivino_cache, load_vivino_rejections, restore_from_gist, save_vivino_cache, save_vivino_rejection
 from .render import _DF_COL_CONFIG, _make_logger, _make_wines_df, wine_card_html
+from .config import CACHE_DIR, CARDS_PER_PAGE, REJECTION_LOG_PATH, SORTS, VIVINO_CACHE_TTL_DAYS, WINE_TYPES
+from .regions import _fuzzy_match, extract_region
 from .scoring import fmt_age, fmt_count, vivino_cache_type
 # END-AUTO
 
@@ -680,12 +680,10 @@ def _activity_journal() -> None:
     evs = read_events(limit=600, kinds=kinds or None, levels=levels or None, contains=q)
     st.caption(f"{len(evs)} événement(s) affiché(s) — le plus récent en haut. Le journal est conservé entre les sessions.")
     st.markdown(_journal_html(evs, 340), unsafe_allow_html=True)
-    for _fn, _lbl in (("debug_leclerc.html", "🐞 Dernière page Leclerc reçue (diagnostic)"),
-                      ("debug_leclerc_panel.html", "🐞 Page avec le sélecteur de magasin (diagnostic)")):
-        _dbg = CACHE_DIR / _fn
-        if _dbg.exists():
-            st.download_button(_lbl, _dbg.read_bytes(), file_name=_fn, mime="text/html",
-                               key=f"dl_{_fn}", help="Page renvoyée par Leclerc lors du dernier échec.")
+    for _dbg in sorted(CACHE_DIR.glob("debug_leclerc*.html")):
+        st.download_button(f"🐞 Diagnostic : {_dbg.stem.replace('debug_leclerc', 'page Leclerc').replace('_', ' ')}",
+                           _dbg.read_bytes(), file_name=_dbg.name, mime="text/html",
+                           key=f"dl_{_dbg.name}", help="Page reçue de Leclerc lors du dernier échec.")
     if evs:
         st.download_button("⬇️ Télécharger (.txt)", "\n".join(format_event(e) for e in evs),
                            file_name="journal-cave.txt", mime="text/plain")

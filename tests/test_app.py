@@ -730,6 +730,23 @@ def test_scrape_all_pages_prefers_http_and_skips_browser(ns, monkeypatch):
     assert lc._scrape_all_leclerc_pages(_NoBrowser(), "vins-rouges")[0]["ean"] == "1"
 
 
+def test_leclerc_http_tries_other_identities(ns, monkeypatch):
+    import cave.leclerc as lc, requests
+    monkeypatch.setattr(lc.time, "sleep", lambda *_: None)
+
+    class _S:
+        def __init__(self): self.headers, self.cookies = {}, requests.cookies.RequestsCookieJar()
+        def get(self, url, timeout=0):
+            ua = self.headers.get("User-Agent", "")
+            ok = "Googlebot" in ua and "page=1" in url
+            return type("R", (), {"status_code": 200, "text": _SSR_PAGE if ok else "<html></html>", "content": b"x"})()
+    monkeypatch.setattr(requests, "Session", _S)
+    lines = []
+    cards = lc._scrape_leclerc_http("vins-rouges", lines.append)
+    assert len(cards) == 2 and any("« Googlebot »" in l and "réussie" in l for l in lines)
+    assert any("[Chrome] aucun vin" in l for l in lines)
+
+
 def test_leclerc_http_blocked_returns_empty_and_logs(ns, monkeypatch):
     import cave.leclerc as lc
     monkeypatch.setattr(lc.time, "sleep", lambda *_: None)
