@@ -615,3 +615,27 @@ def test_background_job_runs_end_to_end_and_journals(ns, monkeypatch):
     assert st_["status"] == "done", st_
     msgs = [e["msg"] for e in ns["read_events"](kinds=["vivino"], run=ns["current_run"]())]
     assert any("Début" in m for m in msgs) and "✅ simulé" in msgs and any("Passage terminé" in m for m in msgs)
+
+
+def test_leclerc_empty_page_is_diagnosed_and_retried(ns, monkeypatch):
+    import cave.leclerc as lc
+    monkeypatch.setattr(lc.time, "sleep", lambda *_: None)
+    import selenium.webdriver.support.ui as ui
+
+    class _W:
+        def __init__(self, *a, **k): pass
+        def until(self, *a, **k): raise TimeoutError()
+    monkeypatch.setattr(ui, "WebDriverWait", _W)
+
+    class _D:
+        title, current_url = "Access Denied", "https://www.e.leclerc/x"
+        page_source = "<html><body>Access Denied - captcha</body></html>"
+        gets = 0
+        def get(self, u): self.gets += 1
+        def execute_script(self, *a): pass
+    d, lines = _D(), []
+    assert lc._scrape_all_leclerc_pages(d, "vins-rouges", lines.append) == []
+    assert d.gets == 3                                   # 3 essais avant d'abandonner
+    text = "\n".join(lines)
+    assert "Access Denied" in text and "blocage probable" in text
+    assert (ns["CACHE_DIR"] / "debug_leclerc.html").exists()
