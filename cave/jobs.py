@@ -3,14 +3,14 @@ import json
 import time
 import threading
 # AUTO-IMPORTS
-from .storage import _JOB_FLUSH_INTERVAL, _invalidate_mem_cache, _job_lock, _read_json_cached, ckpt_create, ckpt_finish, ckpt_load, ckpt_tick, get_rejected_urls, is_hard_to_match, load_leclerc_cache, load_price_history, load_vivino_cache, load_vivino_rejections, save_leclerc_cache, save_vivino_cache, update_price_history
-from .scoring import _merge_vivino, fmt_age, fmt_count
-from .browser import make_driver
 from .activity import add_event, make_log, new_run, save_report
-from .leclerc import _scrape_all_leclerc_pages, _set_store_cookie, check_availability, scrape_leclerc_full
-from .config import JOB_LOG_PATH, JOB_STATE_PATH, VIVINO_CACHE_TTL_DAYS, VIVINO_LOW_CONFIDENCE, _VIVINO_SEL_WORKERS
+from .scoring import _merge_vivino, fmt_age, fmt_count
 from .vivino import _vivino_is_blocked, build_query, fetch_vivino, fetch_vivino_via_api
+from .storage import _JOB_FLUSH_INTERVAL, _invalidate_mem_cache, _job_lock, _read_json_cached, ckpt_create, ckpt_finish, ckpt_load, ckpt_tick, get_rejected_urls, is_hard_to_match, load_leclerc_cache, load_price_history, load_vivino_cache, load_vivino_rejections, save_leclerc_cache, save_vivino_cache, update_price_history
+from .leclerc import _scrape_all_leclerc_pages, _set_store_cookie, check_availability, scrape_leclerc_full
 from .regions import extract_region
+from .config import JOB_LOG_PATH, JOB_STATE_PATH, VIVINO_CACHE_TTL_DAYS, VIVINO_LOW_CONFIDENCE, _VIVINO_SEL_WORKERS
+from .browser import make_driver
 # END-AUTO
 
 # Buffer du job state : n'écrit sur disque qu'1×/seconde max (état propre à ce module).

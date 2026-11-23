@@ -2,8 +2,8 @@
 import time
 import math
 # AUTO-IMPORTS
-from .vivino import build_query
 from .storage import price_trend
+from .vivino import build_query
 from .regions import extract_region
 # END-AUTO
 
