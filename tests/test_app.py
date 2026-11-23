@@ -639,3 +639,26 @@ def test_leclerc_empty_page_is_diagnosed_and_retried(ns, monkeypatch):
     text = "\n".join(lines)
     assert "Access Denied" in text and "blocage probable" in text
     assert (ns["CACHE_DIR"] / "debug_leclerc.html").exists()
+
+
+def test_leclerc_parsing_falls_back_to_product_links(ns):
+    """Si <app-product-card> disparaît du site, on lit les liens produit /fp/<nom>-<EAN>."""
+    html = """<html><body><div class="grid">
+      <article><a href="/fp/les-charmilles-2023-cairanne-aop-rouge-75-cl-3217661024147"><img src="i.jpg"></a>
+        <h3><a href="/fp/les-charmilles-2023-cairanne-aop-rouge-75-cl-3217661024147">Les Charmilles, 2023 - Cairanne AOP - Rouge - 75 cl</a></h3>
+        <div>8 € , 95</div><div>11,93 € / L</div></article>
+      <article><h3><a href="/fp/chateau-test-2019-bordeaux-rouge-75-cl-3000000000011">Château Test, 2019 - Bordeaux - Rouge - 75 cl</a></h3>
+        <span>12,50 €</span></article>
+      <a href="/cat/vins-rouges?page=3">3</a></div></body></html>"""
+    wines, nb = ns["parse_page"](html)
+    assert nb == 3 and len(wines) == 2
+    w = {x["ean"]: x for x in wines}
+    assert w["3217661024147"]["name"].startswith("Les Charmilles") and w["3217661024147"]["vintage"] == 2023
+    assert w["3217661024147"]["price"] == 8.95
+    assert w["3000000000011"]["price"] == 12.5
+
+
+def test_diagnostic_ignores_captcha_words_inside_scripts(ns):
+    class _D: title, current_url = "Vins Rouges | E.leclerc", "https://www.e.leclerc/cat/vins-rouges"
+    html = "<html><script>var recaptcha='robot captcha'</script><body>" + "Bienvenue " * 50 + "</body></html>"
+    assert "blocage probable" not in ns["_diagnose_page"](_D(), html)
