@@ -5,8 +5,8 @@ from bs4 import BeautifulSoup
 # AUTO-IMPORTS
 from .vivino import _CARD_VINTAGE_RE, _EAN_OFFER_RE, _EAN_URL_RE, _PAGE_NUM_RE, _PRICE_CSS1_RE, _PRICE_CSS2_RE, _PRICE_FALLBACK_RE, extract_grapes_from_name, extract_volume_cl
 from .config import CACHE_DIR, LECLERC_PAGE_SIZE, MAX_PAGES, STORE_CODE
-from .storage import update_price_history
 from .browser import make_driver
+from .storage import update_price_history
 # END-AUTO
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -226,6 +226,79 @@ def _diagnose_page(driver, html: str) -> str:
     return " · ".join(parts)
 
 
+STORE_SEARCH_TERMS = ("31700", "Blagnac")      # code postal puis ville du magasin
+
+
+def _dump_debug(name: str, text: str) -> None:
+    try:
+        (CACHE_DIR / name).write_text(text or "", "utf-8")
+    except Exception:
+        pass
+
+
+def _browser_state(driver) -> str:
+    """Cookies, clés de stockage et appels réseau récents : de quoi comprendre comment le site retient le magasin."""
+    out = {}
+    try: out["cookies"] = sorted(c["name"] for c in driver.get_cookies())
+    except Exception: pass
+    for k in ("localStorage", "sessionStorage"):
+        try: out[k] = driver.execute_script(f"return Object.keys(window.{k})")
+        except Exception: pass
+    try:
+        out["reseau"] = driver.execute_script(
+            "return performance.getEntriesByType('resource').map(e=>e.name)"
+            ".filter(n=>/api|rest|search|product|store|magasin/i.test(n)).slice(-25)")
+    except Exception: pass
+    import json as _json
+    return _json.dumps(out, ensure_ascii=False)
+
+
+def _select_store(driver, log=None) -> bool:
+    """Le site actuel n'affiche des vins qu'une fois un magasin choisi (« Choisir mon magasin »).
+    On pilote le sélecteur de magasin comme un humain : ouvrir, taper le code postal, valider le magasin."""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    def say(m):
+        if log: log(f"  🏬 {m}")
+
+    try:
+        btn = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "header-store-locator-btn")))
+        driver.execute_script("arguments[0].click()", btn)
+        say("Sélecteur de magasin ouvert")
+        field = WebDriverWait(driver, 12).until(lambda d: next(
+            (e for e in d.find_elements(By.CSS_SELECTOR,
+                "#header-store-locator input, [id*='store-locator'] input, [role=dialog] input")
+             if e.is_displayed() and (e.get_attribute("type") or "text") in ("text", "search", "")), None))
+        for term in STORE_SEARCH_TERMS:
+            field.clear(); field.send_keys(term)
+            time.sleep(1.5); field.send_keys(Keys.ENTER); time.sleep(3)
+            clicked = driver.execute_script("""
+                const want = arguments[0].toLowerCase();
+                const cands = [...document.querySelectorAll('li, article, [role=listitem], [data-store], div')]
+                    .filter(e => e.innerText && e.innerText.toLowerCase().includes(want) && e.innerText.length < 400
+                                 && /leclerc/i.test(e.innerText));
+                for (const c of cands.reverse()) {
+                    const b = [...c.querySelectorAll('button, a')].find(x => /choisir|sélectionner|selectionner|ce magasin/i.test(x.innerText || ''));
+                    if (b) { b.click(); return c.innerText.slice(0, 120).replace(/\n/g, ' '); }
+                }
+                return '';""", "blagnac")
+            if clicked:
+                say(f"Magasin choisi : {clicked}")
+                time.sleep(3)
+                return True
+        say("Aucun magasin « Blagnac » cliquable dans la liste")
+        try: _dump_debug("debug_leclerc_panel.html", driver.page_source)
+        except Exception: pass
+    except Exception as e:
+        say(f"Sélection du magasin impossible : {type(e).__name__}: {str(e)[:120]}")
+        try: _dump_debug("debug_leclerc_panel.html", driver.page_source)
+        except Exception: pass
+    return False
+
+
 def _scrape_all_leclerc_pages(driver, slug: str, log=None) -> list:
     """
     Itère toutes les pages Leclerc et retourne la liste brute de toutes les cartes.
@@ -240,6 +313,7 @@ def _scrape_all_leclerc_pages(driver, slug: str, log=None) -> list:
     from selenium.webdriver.support import expected_conditions as EC
     _CARD_CSS = "app-product-card, a[href*='/fp/']"
     all_cards, seen_keys = [], set()
+    store_tried = False
     nb_pages = 1
     for p in range(1, MAX_PAGES + 1):
         if log: log(f"  📄 Page {p}/{nb_pages}…")
@@ -268,6 +342,14 @@ def _scrape_all_leclerc_pages(driver, slug: str, log=None) -> list:
                 break
             if log:
                 log(f"  ⚠️ Page {p} : aucune carte lue (essai {attempt}). {_diagnose_page(driver, html)}")
+            if p == 1 and not store_tried and ("Choisir mon magasin" in html or "Aucun résultat" in html):
+                store_tried = True
+                if log: log("  🏬 Aucun magasin sélectionné sur le site : tentative de sélection (Blagnac)…")
+                if _select_store(driver, log):
+                    driver.get(leclerc_url(slug, p))
+                    time.sleep(3)
+                    continue
+                if log: log(f"  🧪 État du navigateur : {_browser_state(driver)}")
             if attempt < (3 if p == 1 else 1):
                 time.sleep(4 * attempt)
         if p == 1:
