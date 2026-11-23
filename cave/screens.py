@@ -6,13 +6,13 @@ import pandas as pd
 import streamlit as st
 # AUTO-IMPORTS
 from .storage import REJECTION_REASONS, _gist_can_restore, _gist_is_configured, _invalidate_mem_cache, _lec_path, _price_hist_path, _viv_path, ckpt_finish, ckpt_load, gist_push, load_leclerc_cache, load_price_history, load_vivino_cache, load_vivino_rejections, restore_from_gist, save_vivino_cache, save_vivino_rejection
-from .jobs import get_price_drops, load_job_state, load_wines_from_cache, repair_zero_prices, run_check_stock, save_job_state, start_background_job
-from .activity import KINDS, LEVELS, format_event, load_report, read_events
-from .regions import _fuzzy_match, extract_region
 from .config import CACHE_DIR, CARDS_PER_PAGE, REJECTION_LOG_PATH, SORTS, VIVINO_CACHE_TTL_DAYS, WINE_TYPES
-from .render import _DF_COL_CONFIG, _make_logger, _make_wines_df, wine_card_html
 from .scoring import fmt_age, fmt_count, vivino_cache_type
+from .activity import KINDS, LEVELS, format_event, load_report, read_events
+from .render import _DF_COL_CONFIG, _make_logger, _make_wines_df, wine_card_html
+from .jobs import get_price_drops, load_job_state, load_wines_from_cache, repair_zero_prices, run_check_stock, save_job_state, start_background_job
 from .vivino import _PROGRESS_RE, build_query
+from .regions import _fuzzy_match, extract_region
 # END-AUTO
 
 

@@ -1,10 +1,11 @@
 """Leclerc : lecture du catalogue (pages produits)."""
+import re
 import time
 from bs4 import BeautifulSoup
 # AUTO-IMPORTS
-from .storage import update_price_history
 from .vivino import _CARD_VINTAGE_RE, _EAN_OFFER_RE, _EAN_URL_RE, _PAGE_NUM_RE, _PRICE_CSS1_RE, _PRICE_CSS2_RE, _PRICE_FALLBACK_RE, extract_grapes_from_name, extract_volume_cl
 from .config import CACHE_DIR, LECLERC_PAGE_SIZE, MAX_PAGES, STORE_CODE
+from .storage import update_price_history
 from .browser import make_driver
 # END-AUTO
 
@@ -54,6 +55,13 @@ def _parse_price(card) -> float:
                     return val
             except ValueError: pass
 
+    # Pattern 4b : prix éclaté « 8 € , 95 » (euros, symbole et centimes dans des éléments séparés)
+    m = re.search(r"(?<![\d,.])(\d{1,3})\s*€\s*[,.]\s*(\d{2})(?!\d)", card.get_text(" "))
+    if m:
+        val = float(f"{m.group(1)}.{m.group(2)}")
+        if 1.0 <= val <= 999.0:
+            return val
+
     # Pattern 5 (fallback ultime) : regex XX,XX € n'importe où dans le HTML de la carte
     # Robuste à tout changement CSS — on cherche le premier montant plausible
     for m in _PRICE_FALLBACK_RE.finditer(card.get_text()):
@@ -64,6 +72,48 @@ def _parse_price(card) -> float:
         except ValueError: pass
 
     return 0.0
+
+def _parse_cards_by_links(soup) -> list:
+    """Plan B si la balise <app-product-card> a disparu : on repart des liens produit `/fp/<nom>-<EAN13>`.
+    Pour chaque produit, on remonte jusqu'au plus petit bloc qui contient son prix sans toucher un autre produit."""
+    import re as _re
+    ean_re = _re.compile(r"/fp/[^?#\s]*?-(\d{13})(?:[/?#]|$)")
+    by_ean: dict[str, list] = {}
+    for a in soup.find_all("a", href=True):
+        m = ean_re.search(a["href"])
+        if m:
+            by_ean.setdefault(m.group(1), []).append(a)
+    wines = []
+    for ean, links in by_ean.items():
+        node, box = links[0], None
+        for _ in range(8):
+            node = node.parent
+            if node is None or getattr(node, "name", None) in (None, "body", "html"):
+                break
+            eans = {ean_re.search(x["href"]).group(1) for x in node.find_all("a", href=True)
+                    if ean_re.search(x["href"])}
+            if len(eans) > 1:
+                break
+            box = node
+            if "€" in node.get_text():
+                break
+        box = box or links[0]
+        head = box.find(["h1", "h2", "h3", "h4"]) if hasattr(box, "find") else None
+        name = (head.get_text(" ", strip=True) if head else "") or \
+               max((a.get_text(" ", strip=True) for a in links), key=len, default="")
+        name = " ".join(name.split())
+        if not name:
+            continue
+        href = links[0]["href"]
+        url = href if href.startswith("http") else f"https://www.e.leclerc{href}"
+        img = box.find("img") if hasattr(box, "find") else None
+        image = (img.get("src") or img.get("data-src") or "") if img else ""
+        ym = _CARD_VINTAGE_RE.search(name)
+        wines.append({"name": name, "price": _parse_price(box), "url": url, "ean": ean, "image": image,
+                      "vintage": int(ym.group(1)) if ym else None,
+                      "grapes_hint": extract_grapes_from_name(name), "volume_cl": extract_volume_cl(name)})
+    return wines
+
 
 def parse_page(html: str) -> tuple[list, int]:
     """
@@ -96,6 +146,8 @@ def parse_page(html: str) -> tuple[list, int]:
                       "vintage":     int(ym.group(1)) if ym else None,
                       "grapes_hint": extract_grapes_from_name(name),
                       "volume_cl":   extract_volume_cl(name)})
+    if not wines:
+        wines = _parse_cards_by_links(soup)
     nums = [int(m.group(1))
             for a in soup.find_all("a", href=True)
             if (m := _PAGE_NUM_RE.search(a["href"]))]
@@ -155,7 +207,10 @@ def _diagnose_page(driver, html: str) -> str:
     except Exception: title = "?"
     try: url = driver.current_url[:110]
     except Exception: url = "?"
-    hints = sorted({v for k, v in _BLOCK_MARKERS.items() if k in low})
+    # Seul le texte visible compte : « captcha » ou « robot » apparaissent dans les scripts de toute page normale.
+    visible = re.sub(r"<(script|style)\b.*?</\1>|<[^>]+>", " ", html or "", flags=re.S | re.I).lower()
+    head = (title.lower() + " " + visible[:1500])
+    hints = sorted({v for k, v in _BLOCK_MARKERS.items() if k in head})
     n_cards = low.count("<app-product-card")
     parts = [f"titre « {title} »", f"URL {url}", f"{len(html or '')//1000} ko", f"{n_cards} <app-product-card>"]
     if hints:
@@ -183,7 +238,7 @@ def _scrape_all_leclerc_pages(driver, slug: str, log=None) -> list:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
-    _CARD_CSS = "app-product-card"
+    _CARD_CSS = "app-product-card, a[href*='/fp/']"
     all_cards, seen_keys = [], set()
     nb_pages = 1
     for p in range(1, MAX_PAGES + 1):
