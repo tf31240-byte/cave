@@ -619,6 +619,7 @@ def test_background_job_runs_end_to_end_and_journals(ns, monkeypatch):
 
 def test_leclerc_empty_page_is_diagnosed_and_retried(ns, monkeypatch):
     import cave.leclerc as lc
+    monkeypatch.setattr(lc, "_scrape_leclerc_http", lambda slug, log=None: [])
     monkeypatch.setattr(lc.time, "sleep", lambda *_: None)
     import selenium.webdriver.support.ui as ui
 
@@ -666,6 +667,7 @@ def test_diagnostic_ignores_captcha_words_inside_scripts(ns):
 
 def test_leclerc_without_store_tries_selection_and_never_crashes(ns, monkeypatch):
     import cave.leclerc as lc
+    monkeypatch.setattr(lc, "_scrape_leclerc_http", lambda slug, log=None: [])
     import selenium.webdriver.support.ui as ui
     monkeypatch.setattr(lc.time, "sleep", lambda *_: None)
 
@@ -685,3 +687,53 @@ def test_leclerc_without_store_tries_selection_and_never_crashes(ns, monkeypatch
     text = "\n".join(lines)
     assert "Aucun magasin sélectionné" in text and "Sélection du magasin impossible" in text
     assert "État du navigateur" in text and "abc" in text
+
+
+_SSR_PAGE = """<html><head><title>Vins Rouges</title></head><body>
+  <article><h3><a href="/fp/les-charmilles-2023-cairanne-aop-rouge-75-cl-3217661024147">Les Charmilles, 2023 - Cairanne AOP - Rouge - 75 cl</a></h3><div>8 € , 95</div></article>
+  <article><h3><a href="/fp/chateau-test-2019-bordeaux-rouge-75-cl-3000000000011">Château Test, 2019 - Bordeaux - Rouge - 75 cl</a></h3><span>12,50 €</span></article>
+</body></html>"""
+
+
+def _fake_requests(monkeypatch, pages):
+    import requests
+
+    class _R:
+        def __init__(self, status, text): self.status_code, self.text, self.content = status, text, text.encode()
+
+    class _S:
+        def __init__(self):
+            self.headers, self.cookies, self.calls = {}, requests.cookies.RequestsCookieJar(), []
+        def get(self, url, timeout=0):
+            self.calls.append(url)
+            return pages(url)
+    monkeypatch.setattr(requests, "Session", _S)
+
+
+def test_leclerc_http_reads_products_without_browser(ns, monkeypatch):
+    import cave.leclerc as lc
+    monkeypatch.setattr(lc.time, "sleep", lambda *_: None)
+    _fake_requests(monkeypatch, lambda url: type("R", (), {"status_code": 200, "text": _SSR_PAGE if "page=1" in url else "<html></html>",
+                                                          "content": b"x" * 10})())
+    lines = []
+    cards = lc._scrape_leclerc_http("vins-rouges", lines.append)
+    assert [c["ean"] for c in cards] == ["3217661024147", "3000000000011"]
+    assert cards[0]["price"] == 8.95 and cards[1]["price"] == 12.5
+
+
+def test_scrape_all_pages_prefers_http_and_skips_browser(ns, monkeypatch):
+    import cave.leclerc as lc
+    monkeypatch.setattr(lc, "_scrape_leclerc_http", lambda slug, log=None: [{"name": "Vin", "ean": "1"}])
+
+    class _NoBrowser:
+        def get(self, u): raise AssertionError("le navigateur ne doit pas être utilisé")
+    assert lc._scrape_all_leclerc_pages(_NoBrowser(), "vins-rouges")[0]["ean"] == "1"
+
+
+def test_leclerc_http_blocked_returns_empty_and_logs(ns, monkeypatch):
+    import cave.leclerc as lc
+    monkeypatch.setattr(lc.time, "sleep", lambda *_: None)
+    _fake_requests(monkeypatch, lambda url: type("R", (), {"status_code": 403, "text": "Access Denied", "content": b"x"})())
+    lines = []
+    assert lc._scrape_leclerc_http("vins-rouges", lines.append) == []
+    assert any("HTTP 403" in l for l in lines)

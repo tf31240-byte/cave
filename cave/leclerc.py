@@ -3,8 +3,8 @@ import re
 import time
 from bs4 import BeautifulSoup
 # AUTO-IMPORTS
-from .vivino import _CARD_VINTAGE_RE, _EAN_OFFER_RE, _EAN_URL_RE, _PAGE_NUM_RE, _PRICE_CSS1_RE, _PRICE_CSS2_RE, _PRICE_FALLBACK_RE, extract_grapes_from_name, extract_volume_cl
 from .config import CACHE_DIR, LECLERC_PAGE_SIZE, MAX_PAGES, STORE_CODE
+from .vivino import _CARD_VINTAGE_RE, _EAN_OFFER_RE, _EAN_URL_RE, _PAGE_NUM_RE, _PRICE_CSS1_RE, _PRICE_CSS2_RE, _PRICE_FALLBACK_RE, extract_grapes_from_name, extract_volume_cl
 from .storage import update_price_history
 from .browser import make_driver
 # END-AUTO
@@ -220,6 +220,16 @@ def _diagnose_page(driver, html: str) -> str:
     else:
         parts.append("aucune carte : page vide ou chargement trop lent")
     try:
+        logs = [e.get("message", "")[:160] for e in driver.get_log("browser") if e.get("level") == "SEVERE"][-4:]
+        if logs:
+            parts.append("console : " + " | ".join(logs))
+    except Exception:
+        pass
+    try:
+        parts.append("navigateur " + str(driver.capabilities.get("browserVersion", "?")))
+    except Exception:
+        pass
+    try:
         (CACHE_DIR / "debug_leclerc.html").write_text(html or "", "utf-8")
     except Exception:
         pass
@@ -322,6 +332,64 @@ def _select_store(driver, log=None) -> bool:
     return False
 
 
+_HTTP_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36")
+
+
+def _scrape_leclerc_http(slug: str, log=None) -> list:
+    """Lecture du rayon SANS navigateur : le serveur Leclerc renvoie la liste des vins dans le HTML initial
+    (le navigateur, lui, n'affichait que des squelettes car les composants JS ne se chargeaient pas).
+    Plus rapide et plus fiable ; retourne [] si le site refuse, auquel cas on retombe sur Selenium."""
+    try:
+        import requests
+    except Exception:
+        return []
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": _HTTP_UA, "Accept-Language": "fr-FR,fr;q=0.9",
+                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"})
+    for name in ("oaf-sign-code", "oafSignCode"):
+        sess.cookies.set(name, STORE_CODE, domain=".e.leclerc", path="/")
+    cards, seen = [], set()
+    if log: log("🌐 Lecture directe du rayon Leclerc (sans navigateur)…")
+    for p in range(1, MAX_PAGES + 1):
+        url = leclerc_url(slug, p).split("#")[0]
+        try:
+            r = sess.get(url, timeout=30)
+        except Exception as e:
+            if log: log(f"  ⚠️ Page {p} : requête impossible ({type(e).__name__}: {str(e)[:100]})")
+            break
+        if r.status_code != 200:
+            if log: log(f"  ⚠️ Page {p} : HTTP {r.status_code} ({len(r.content)//1000} ko)")
+            if p == 1: _dump_debug("debug_leclerc_http.html", r.text)
+            break
+        page_cards, nb = parse_page(r.text)
+        new = []
+        for c in page_cards:
+            k = c.get("ean") or c.get("name")
+            if k and k not in seen:
+                seen.add(k); new.append(c)
+        if log: log(f"  📄 Page {p} : +{len(new)} vins (total {len(cards) + len(new)}) · {len(r.content)//1000} ko")
+        if not new:
+            if p == 1:
+                _dump_debug("debug_leclerc_http.html", r.text)
+                if log: log("  ⚠️ Aucun vin dans le HTML renvoyé : " + _diagnose_text(r.text))
+            break
+        cards.extend(new)
+        if p >= nb and nb > 1:
+            break
+        time.sleep(1.0)
+    return cards
+
+
+def _diagnose_text(html: str) -> str:
+    low = html.lower()
+    title = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
+    visible = re.sub(r"<(script|style)\b.*?</\1>|<[^>]+>", " ", html, flags=re.S | re.I).lower()
+    hints = sorted({v for k, v in _BLOCK_MARKERS.items() if k in (title.group(1).lower() if title else "") + visible[:1500]})
+    return (f"titre « {(title.group(1).strip() if title else '?')[:70]} » · {len(html)//1000} ko · "
+            f"{low.count('/fp/')} liens produit" + (f" · 🚫 {', '.join(hints)}" if hints else ""))
+
+
 def _scrape_all_leclerc_pages(driver, slug: str, log=None) -> list:
     """
     Itère toutes les pages Leclerc et retourne la liste brute de toutes les cartes.
@@ -334,6 +402,10 @@ def _scrape_all_leclerc_pages(driver, slug: str, log=None) -> list:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
+    cards_http = _scrape_leclerc_http(slug, log)
+    if cards_http:
+        return cards_http
+    if log: log("  ↪️ Lecture directe sans résultat : bascule sur le navigateur…")
     _CARD_CSS = "app-product-card, a[href*='/fp/']"
     all_cards, seen_keys = [], set()
     store_tried = False

@@ -20,6 +20,7 @@ def make_driver(fast: bool = False):
     opts.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+    opts.set_capability("goog:loggingPrefs", {"browser": "SEVERE"})   # erreurs JS lisibles pour le diagnostic
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
     if fast:
